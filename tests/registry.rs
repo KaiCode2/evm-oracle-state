@@ -1,10 +1,10 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use alloy_primitives::{Address, I256, U256};
+use alloy_primitives::{Address, B256, I256, U256};
 use evm_oracle_state::{
-    ChainlinkFeedProvider, FeedConfig, FeedMetadata, FeedStatus, OracleError, OracleRegistry,
-    RoundData, StalenessPolicy,
+    AggregatorLayout, AggregatorLayoutConfidence, ChainlinkFeedProvider, FeedConfig, FeedMetadata,
+    FeedStatus, OracleError, OracleRegistry, RoundData, StalenessPolicy,
 };
 
 type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OracleError>> + Send + 'a>>;
@@ -20,11 +20,27 @@ struct FeedFixture {
 #[derive(Clone, Debug)]
 struct MockProvider {
     feed: FeedFixture,
+    type_and_version: Option<String>,
+    code_hash: Option<B256>,
 }
 
 impl MockProvider {
     fn new(feed: FeedFixture) -> Self {
-        Self { feed }
+        Self {
+            feed,
+            type_and_version: None,
+            code_hash: None,
+        }
+    }
+
+    fn with_type_and_version(mut self, type_and_version: impl Into<String>) -> Self {
+        self.type_and_version = Some(type_and_version.into());
+        self
+    }
+
+    fn with_code_hash(mut self, code_hash: B256) -> Self {
+        self.code_hash = Some(code_hash);
+        self
     }
 }
 
@@ -53,6 +69,21 @@ impl ChainlinkFeedProvider for MockProvider {
         assert_eq!(proxy, self.feed.proxy);
         Box::pin(async move { Ok(self.feed.aggregator) })
     }
+
+    fn aggregator_type_and_version(
+        &self,
+        aggregator: Address,
+    ) -> ProviderFuture<'_, Option<String>> {
+        assert_eq!(Some(aggregator), self.feed.aggregator);
+        let type_and_version = self.type_and_version.clone();
+        Box::pin(async move { Ok(type_and_version) })
+    }
+
+    fn aggregator_code_hash(&self, aggregator: Address) -> ProviderFuture<'_, Option<B256>> {
+        assert_eq!(Some(aggregator), self.feed.aggregator);
+        let code_hash = self.code_hash;
+        Box::pin(async move { Ok(code_hash) })
+    }
 }
 
 fn metadata() -> FeedMetadata {
@@ -74,9 +105,17 @@ fn round(answer: i64, updated_at: u64) -> RoundData {
 }
 
 fn fixture(round: RoundData) -> FeedFixture {
+    fixture_for(
+        Address::repeat_byte(0x10),
+        Some(Address::repeat_byte(0x20)),
+        round,
+    )
+}
+
+fn fixture_for(proxy: Address, aggregator: Option<Address>, round: RoundData) -> FeedFixture {
     FeedFixture {
-        proxy: Address::repeat_byte(0x10),
-        aggregator: Some(Address::repeat_byte(0x20)),
+        proxy,
+        aggregator,
         metadata: metadata(),
         round,
     }
@@ -116,6 +155,106 @@ async fn register_chainlink_feed_loads_metadata_aggregator_and_initial_snapshot(
         I256::unchecked_from(250_000_000_000_i64)
     );
     assert_eq!(snapshot.status, FeedStatus::Fresh);
+}
+
+#[tokio::test]
+async fn register_detects_ocr2_layout_from_type_and_version() {
+    let now = 1_700_004_000;
+    let feed = fixture(round(250_000_000_000, now - 120));
+    let code_hash = B256::repeat_byte(0x99);
+    let provider = MockProvider::new(feed.clone())
+        .with_type_and_version("AccessControlledOCR2Aggregator 1.0.0")
+        .with_code_hash(code_hash);
+    let mut registry = OracleRegistry::new_at_timestamp(now);
+
+    let id = registry
+        .register_chainlink_feed(
+            &provider,
+            FeedConfig {
+                proxy: feed.proxy,
+                label: Some("ETH/USD".to_string()),
+                staleness: StalenessPolicy::max_age(60 * 60),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("registration should detect OCR2 layout");
+
+    let evidence = registry
+        .registration(id)
+        .expect("registered feed")
+        .aggregator_layout
+        .as_ref()
+        .expect("layout evidence");
+    assert_eq!(evidence.layout, AggregatorLayout::ChainlinkOcr2V1);
+    assert_eq!(
+        evidence.confidence,
+        AggregatorLayoutConfidence::TypeAndVersion
+    );
+    assert_eq!(
+        evidence.type_and_version.as_deref(),
+        Some("AccessControlledOCR2Aggregator 1.0.0")
+    );
+    assert_eq!(evidence.code_hash, Some(code_hash));
+}
+
+#[tokio::test]
+async fn register_can_use_cached_code_hash_layout_when_type_and_version_is_missing() {
+    let now = 1_700_004_000;
+    let code_hash = B256::repeat_byte(0x42);
+    let first = fixture_for(
+        Address::repeat_byte(0x10),
+        Some(Address::repeat_byte(0x20)),
+        round(250_000_000_000, now - 120),
+    );
+    let second = fixture_for(
+        Address::repeat_byte(0x11),
+        Some(Address::repeat_byte(0x21)),
+        round(250_000_000_000, now - 120),
+    );
+    let mut registry = OracleRegistry::new_at_timestamp(now);
+
+    registry
+        .register_chainlink_feed(
+            &MockProvider::new(first.clone())
+                .with_type_and_version("AccessControlledOCR2Aggregator 1.0.0")
+                .with_code_hash(code_hash),
+            FeedConfig {
+                proxy: first.proxy,
+                label: Some("ETH/USD".to_string()),
+                staleness: StalenessPolicy::max_age(60 * 60),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("first registration seeds code-hash cache");
+
+    let id = registry
+        .register_chainlink_feed(
+            &MockProvider::new(second.clone()).with_code_hash(code_hash),
+            FeedConfig {
+                proxy: second.proxy,
+                label: Some("ETH/USD 2".to_string()),
+                staleness: StalenessPolicy::max_age(60 * 60),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("second registration should use cached code-hash layout");
+
+    let evidence = registry
+        .registration(id)
+        .expect("registered feed")
+        .aggregator_layout
+        .as_ref()
+        .expect("layout evidence");
+    assert_eq!(evidence.layout, AggregatorLayout::ChainlinkOcr2V1);
+    assert_eq!(
+        evidence.confidence,
+        AggregatorLayoutConfidence::CodeHashCache
+    );
+    assert_eq!(evidence.type_and_version, None);
+    assert_eq!(evidence.code_hash, Some(code_hash));
 }
 
 #[tokio::test]

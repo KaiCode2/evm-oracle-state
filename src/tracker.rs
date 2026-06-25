@@ -3,7 +3,7 @@ use alloy_primitives::{Address, B256, I256, U256};
 use evm_fork_cache::reactive::{ReactiveBatchReport, ReactiveReport};
 
 use crate::{
-    AggregatorChange, ChainlinkFeedProvider, FeedId, FeedRegistration,
+    AggregatorChange, AggregatorLayoutEvidence, ChainlinkFeedProvider, FeedId, FeedRegistration,
     ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE, OracleBlockRef, OracleError,
     OraclePrice, OracleRegistry, OracleSignalKind, OracleSnapshot, OracleSnapshotStatus, RoundData,
     SnapshotSource,
@@ -49,6 +49,8 @@ pub struct OraclePriceUpdate {
     pub decimals: u8,
     /// Event round id.
     pub event_round_id: U256,
+    /// Event-derived `startedAt` timestamp.
+    pub started_at: u64,
     /// Event `updatedAt` timestamp.
     pub updated_at: u64,
     /// Event block number, when known.
@@ -66,7 +68,7 @@ impl OraclePriceUpdate {
         RoundData {
             round_id: self.event_round_id,
             answer: self.raw_answer,
-            started_at: self.updated_at,
+            started_at: self.started_at,
             updated_at: self.updated_at,
             answered_in_round: self.event_round_id,
         }
@@ -422,6 +424,10 @@ impl OracleTracker {
                 .aggregator(registration.proxy)
                 .await
                 .unwrap_or(registration.current_aggregator);
+            let new_layout = self
+                .registry
+                .detect_aggregator_layout(provider, new_aggregator, None)
+                .await;
             let old_aggregator = registration.current_aggregator;
             let snapshot = snapshot_from_proxy_read(
                 &registration,
@@ -448,12 +454,14 @@ impl OracleTracker {
             }
 
             registration.current_aggregator = new_aggregator;
+            registration.aggregator_layout = new_layout.clone();
             if let Some(stored) = self
                 .registry
                 .registrations_map_mut()
                 .get_mut(&registration.id)
             {
                 stored.current_aggregator = new_aggregator;
+                stored.aggregator_layout = new_layout;
             }
             self.registry.replace_snapshot(snapshot);
             self.clear_pending_for_proxy(registration.proxy);
@@ -617,6 +625,7 @@ impl OracleTracker {
         request: &OracleReconciliationRequest,
         proxy_round: RoundData,
         new_aggregator: Option<Address>,
+        new_layout: Option<AggregatorLayoutEvidence>,
     ) -> Result<Vec<OracleHookEvent>, OracleError> {
         let Some(registration) = self.registry.registrations_map().get(&request.id).cloned() else {
             return Err(OracleError::FeedNotFound);
@@ -712,6 +721,7 @@ impl OracleTracker {
             .get_mut(&registration.id)
         {
             stored.current_aggregator = new_aggregator;
+            stored.aggregator_layout = new_layout;
         }
         self.registry.replace_snapshot(snapshot);
         self.complete_pending_reconciliation(request);
@@ -753,7 +763,11 @@ impl OracleReconciler {
                     .current_aggregator(request.id)
                     .or(request.aggregator)
             });
-        let hooks = tracker.apply_reconciled_request(&request, proxy_round, new_aggregator)?;
+        let new_layout = tracker
+            .detect_aggregator_layout(provider, new_aggregator, block_ref)
+            .await;
+        let hooks =
+            tracker.apply_reconciled_request(&request, proxy_round, new_aggregator, new_layout)?;
         self.queue.pop_front();
 
         Ok(Some(OracleReconciliationResult { request, hooks }))
@@ -761,6 +775,17 @@ impl OracleReconciler {
 }
 
 impl OracleTracker {
+    async fn detect_aggregator_layout<P: ChainlinkFeedProvider>(
+        &mut self,
+        provider: &P,
+        aggregator: Option<Address>,
+        block: Option<OracleBlockRef>,
+    ) -> Option<AggregatorLayoutEvidence> {
+        self.registry
+            .detect_aggregator_layout(provider, aggregator, block)
+            .await
+    }
+
     fn current_aggregator(&self, id: FeedId) -> Option<Address> {
         self.registry
             .registrations_map()

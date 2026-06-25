@@ -1,9 +1,27 @@
-use alloy_primitives::{Address, B256, Bytes, I256, Log as PrimitiveLog, U256, keccak256};
+use alloy_primitives::{
+    Address, B256, Bytes, I256, Log as PrimitiveLog, U256, aliases::I192, aliases::U40, keccak256,
+};
 use alloy_rpc_types_eth::Log as RpcLog;
+use alloy_sol_types::SolEvent;
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, AnswerUpdated, ChainlinkEventDecodeError, NEW_ROUND_TOPIC, NewRound,
-    decode_answer_updated, decode_new_round,
+    OCR2_NEW_TRANSMISSION_TOPIC, Ocr2NewTransmission, decode_answer_updated, decode_new_round,
+    decode_ocr2_new_transmission,
 };
+
+alloy_sol_types::sol! {
+    event NewTransmission(
+        uint32 indexed aggregatorRoundId,
+        int192 answer,
+        address transmitter,
+        uint32 observationsTimestamp,
+        int192[] observations,
+        bytes observers,
+        int192 juelsPerFeeCoin,
+        bytes32 configDigest,
+        uint40 epochAndRound
+    );
+}
 
 fn rpc_log(address: Address, topics: Vec<B256>, data: Vec<u8>) -> RpcLog {
     RpcLog {
@@ -45,6 +63,12 @@ fn exposes_chainlink_event_topics() {
     assert_eq!(
         NEW_ROUND_TOPIC,
         keccak256("NewRound(uint256,address,uint256)")
+    );
+    assert_eq!(
+        OCR2_NEW_TRANSMISSION_TOPIC,
+        keccak256(
+            "NewTransmission(uint32,int192,address,uint32,int192[],bytes,int192,bytes32,uint40)"
+        )
     );
 }
 
@@ -105,6 +129,48 @@ fn decodes_new_round_for_observability() {
             round_id,
             started_by,
             started_at: 1_700_000_456,
+            block_number: Some(100),
+            log_index: Some(3),
+            removed: false,
+        }
+    );
+}
+
+#[test]
+fn decodes_ocr2_new_transmission_with_started_at_source() {
+    let aggregator = Address::repeat_byte(0x55);
+    let transmitter = Address::repeat_byte(0x66);
+    let config_digest = B256::repeat_byte(0x77);
+    let event = NewTransmission {
+        aggregatorRoundId: 42,
+        answer: I192::try_from(-123_i64).expect("answer fits int192"),
+        transmitter,
+        observationsTimestamp: 1_700_000_321,
+        observations: vec![I192::try_from(-120_i64).expect("observation fits int192")],
+        observers: Bytes::from(vec![0x01]),
+        juelsPerFeeCoin: I192::ZERO,
+        configDigest: config_digest,
+        epochAndRound: U40::from(0x1a_89_04_u64),
+    };
+    let log = rpc_log(
+        aggregator,
+        vec![OCR2_NEW_TRANSMISSION_TOPIC, uint_topic(U256::from(42_u64))],
+        event.encode_data().to_vec(),
+    );
+
+    let decoded =
+        decode_ocr2_new_transmission(&log).expect("valid OCR2 NewTransmission log should decode");
+
+    assert_eq!(
+        decoded,
+        Ocr2NewTransmission {
+            aggregator,
+            aggregator_round_id: U256::from(42_u64),
+            answer: I256::unchecked_from(-123_i64),
+            transmitter,
+            observations_timestamp: 1_700_000_321,
+            config_digest,
+            epoch_and_round: 0x1a_89_04,
             block_number: Some(100),
             log_index: Some(3),
             removed: false,

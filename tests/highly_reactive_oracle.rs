@@ -92,6 +92,7 @@ fn registration(proxy: Address, aggregator: Address) -> FeedRegistration {
         quote: Some("USD".to_string()),
         staleness: StalenessPolicy::max_age(60 * 60),
         current_aggregator: Some(aggregator),
+        aggregator_layout: None,
         metadata: metadata(),
     }
 }
@@ -193,8 +194,7 @@ async fn setup_cache() -> EvmCache {
     EvmCache::new(Arc::new(provider)).await
 }
 
-async fn apply_answer_update(
-    tracker: &mut OracleTracker,
+struct AnswerUpdateInput {
     proxy: Address,
     aggregator: Address,
     answer: i64,
@@ -202,6 +202,11 @@ async fn apply_answer_update(
     updated_at: u64,
     block_number: u64,
     log_index: u64,
+}
+
+async fn apply_answer_update(
+    tracker: &mut OracleTracker,
+    event: AnswerUpdateInput,
 ) -> evm_fork_cache::reactive::ReactiveBatchReport<Ethereum> {
     let handler = OracleReactiveHandler::new(tracker.registrations().collect::<Vec<_>>());
     let mut runtime = ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default());
@@ -210,21 +215,24 @@ async fn apply_answer_update(
         .expect("register handler");
     let mut cache = setup_cache().await;
     let log = rpc_log(
-        aggregator,
+        event.aggregator,
         vec![
             ANSWER_UPDATED_TOPIC,
-            int_topic(I256::unchecked_from(answer)),
-            uint_topic(U256::from(round_id)),
+            int_topic(I256::unchecked_from(event.answer)),
+            uint_topic(U256::from(event.round_id)),
         ],
-        word(U256::from(updated_at)),
-        block_number,
-        log_index,
+        word(U256::from(event.updated_at)),
+        event.block_number,
+        event.log_index,
     );
 
     let report = runtime
         .ingest_batch(
             &mut cache,
-            batch(ReactiveInput::Log(log), context(block_number, log_index)),
+            batch(
+                ReactiveInput::Log(log),
+                context(event.block_number, event.log_index),
+            ),
         )
         .expect("runtime should commit oracle event");
     tracker
@@ -232,7 +240,7 @@ async fn apply_answer_update(
         .expect("committed report should update typed oracle state");
 
     assert!(
-        tracker.latest(proxy).is_some(),
+        tracker.latest(event.proxy).is_some(),
         "test helper must leave the tracked proxy present"
     );
     report
@@ -276,13 +284,15 @@ async fn price_update_hook_is_immediate_metadata_rich_and_queues_reconciliation(
 
     let report = apply_answer_update(
         &mut tracker,
-        proxy,
-        aggregator,
-        2_150_000_000,
-        101,
-        1_700_000_430,
-        140,
-        7,
+        AnswerUpdateInput {
+            proxy,
+            aggregator,
+            answer: 2_150_000_000,
+            round_id: 101,
+            updated_at: 1_700_000_430,
+            block_number: 140,
+            log_index: 7,
+        },
     )
     .await;
 
@@ -328,13 +338,15 @@ async fn oracle_read_overlay_serves_event_price_before_reconciliation_and_refuse
 
     let _ = apply_answer_update(
         &mut tracker,
-        proxy,
-        aggregator,
-        2_175_000_000,
-        101,
-        1_700_000_440,
-        141,
-        0,
+        AnswerUpdateInput {
+            proxy,
+            aggregator,
+            answer: 2_175_000_000,
+            round_id: 101,
+            updated_at: 1_700_000_440,
+            block_number: 141,
+            log_index: 0,
+        },
     )
     .await;
 
@@ -418,13 +430,15 @@ async fn reconciler_confirms_matching_events_and_corrects_mismatched_proxy_reads
     let mut tracker = seeded_tracker(proxy, aggregator, 1_700_000_500);
     let _ = apply_answer_update(
         &mut tracker,
-        proxy,
-        aggregator,
-        2_200_000_000,
-        101,
-        1_700_000_450,
-        142,
-        0,
+        AnswerUpdateInput {
+            proxy,
+            aggregator,
+            answer: 2_200_000_000,
+            round_id: 101,
+            updated_at: 1_700_000_450,
+            block_number: 142,
+            log_index: 0,
+        },
     )
     .await;
 
@@ -463,13 +477,15 @@ async fn reconciler_confirms_matching_events_and_corrects_mismatched_proxy_reads
 
     let _ = apply_answer_update(
         &mut tracker,
-        proxy,
-        aggregator,
-        2_250_000_000,
-        102,
-        1_700_000_470,
-        143,
-        0,
+        AnswerUpdateInput {
+            proxy,
+            aggregator,
+            answer: 2_250_000_000,
+            round_id: 102,
+            updated_at: 1_700_000_470,
+            block_number: 143,
+            log_index: 0,
+        },
     )
     .await;
     let mut reconciler = OracleReconciler::default();
@@ -519,13 +535,15 @@ async fn reconciler_reports_aggregator_changes_and_stale_proxy_reads() {
     let mut tracker = seeded_tracker(proxy, old_aggregator, 1_700_008_000);
     let _ = apply_answer_update(
         &mut tracker,
-        proxy,
-        old_aggregator,
-        2_300_000_000,
-        101,
-        1_700_000_500,
-        144,
-        0,
+        AnswerUpdateInput {
+            proxy,
+            aggregator: old_aggregator,
+            answer: 2_300_000_000,
+            round_id: 101,
+            updated_at: 1_700_000_500,
+            block_number: 144,
+            log_index: 0,
+        },
     )
     .await;
 

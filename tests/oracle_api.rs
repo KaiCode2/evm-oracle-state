@@ -104,6 +104,7 @@ fn registration(proxy: Address, aggregator: Address) -> FeedRegistration {
         quote: Some("USD".to_string()),
         staleness: StalenessPolicy::max_age(3_600),
         current_aggregator: Some(aggregator),
+        aggregator_layout: None,
         metadata: metadata(),
     }
 }
@@ -177,6 +178,7 @@ fn typed_signal_decodes_hook_without_string_matching() {
         raw_answer: I256::unchecked_from(2_000_000_000_i64),
         decimals: 8,
         event_round_id: U256::from(101_u64),
+        started_at: 1_700_000_000,
         updated_at: 1_700_000_000,
         block_number: Some(100),
         block_hash: Some(block_hash(100)),

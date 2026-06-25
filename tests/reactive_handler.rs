@@ -100,6 +100,7 @@ fn registration(proxy: Address, aggregator: Address) -> FeedRegistration {
         quote: Some("USD".to_string()),
         staleness: StalenessPolicy::max_age(60 * 60),
         current_aggregator: Some(aggregator),
+        aggregator_layout: None,
         metadata: FeedMetadata {
             decimals: 8,
             description: "ETH / USD".to_string(),

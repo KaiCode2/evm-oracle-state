@@ -25,6 +25,7 @@ alloy_sol_types::sol! {
         uint80 answeredInRound
     );
     function aggregator() external view returns (address);
+    function typeAndVersion() external view returns (string);
 }
 
 const MAINNET_ETH_USD: Address = address!("5f4eC3Df9cbd43714FE2740f5E3616155c5b8419");
@@ -118,6 +119,24 @@ impl ChainlinkFeedProvider for RpcChainlinkProvider {
                 return Ok(None);
             };
             Ok(aggregatorCall::abi_decode_returns(&bytes).ok())
+        })
+    }
+
+    fn aggregator_type_and_version(
+        &self,
+        aggregator: Address,
+    ) -> ProviderFuture<'_, Option<String>> {
+        Box::pin(async move {
+            let Ok(bytes) = eth_call(
+                &self.provider,
+                aggregator,
+                typeAndVersionCall {}.abi_encode(),
+            )
+            .await
+            else {
+                return Ok(None);
+            };
+            Ok(typeAndVersionCall::abi_decode_returns(&bytes).ok())
         })
     }
 }

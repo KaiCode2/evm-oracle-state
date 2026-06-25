@@ -7,6 +7,7 @@
 mod config;
 mod error;
 mod events;
+mod layout;
 mod overlay;
 mod price;
 mod provider;
@@ -21,8 +22,12 @@ mod tracker;
 pub use config::{FeedConfig, StalenessPolicy};
 pub use error::{ChainlinkEventDecodeError, OracleError, OracleSignalDecodeError};
 pub use events::{
-    ANSWER_UPDATED_TOPIC, AnswerUpdated, NEW_ROUND_TOPIC, NewRound, decode_answer_updated,
-    decode_new_round,
+    ANSWER_UPDATED_TOPIC, AnswerUpdated, NEW_ROUND_TOPIC, NewRound, OCR2_NEW_TRANSMISSION_TOPIC,
+    Ocr2NewTransmission, decode_answer_updated, decode_new_round, decode_ocr2_new_transmission,
+};
+pub use layout::{
+    AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence,
+    classify_type_and_version,
 };
 pub use overlay::OracleReadOverlay;
 pub use price::OraclePrice;
@@ -37,7 +42,8 @@ pub use state::{
     FeedMetadata, FeedStatus, OracleSnapshot, OracleSnapshotStatus, RoundData, SnapshotSource,
 };
 pub use storage::{
-    OracleStorageAdapter, OracleStorageEffect, OracleStorageError, OracleStorageSync,
+    ChainlinkOcr2StorageAdapter, Ocr2TransmissionStorageUpdate, OracleStorageAdapter,
+    OracleStorageEffect, OracleStorageError, OracleStorageSync,
 };
 pub use tracker::{
     OracleAggregatorChanged, OracleHookEvent, OraclePriceConfirmed, OraclePriceCorrected,

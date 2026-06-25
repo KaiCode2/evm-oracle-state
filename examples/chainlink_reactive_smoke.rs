@@ -1,11 +1,12 @@
 use std::{
+    collections::BTreeMap,
     error::Error,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use alloy_network::{AnyNetwork, Ethereum, TransactionBuilder};
-use alloy_primitives::{Address, Bytes, U256, address};
+use alloy_primitives::{Address, B256, Bytes, U256, address};
 use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::{Filter, Log as RpcLog, TransactionRequest};
@@ -21,9 +22,9 @@ use evm_fork_cache::{
     state_update::PurgeScope,
 };
 use evm_oracle_state::{
-    ANSWER_UPDATED_TOPIC, ChainlinkFeedProvider, FeedConfig, FeedStatus, OracleError,
-    OracleReactiveHandler, OracleRegistry, OracleTracker, ProviderFuture, RoundData,
-    SnapshotSource, StalenessPolicy,
+    ANSWER_UPDATED_TOPIC, AggregatorLayout, ChainlinkFeedProvider, FeedConfig, FeedStatus,
+    OCR2_NEW_TRANSMISSION_TOPIC, OracleError, OracleReactiveHandler, OracleRegistry, OracleTracker,
+    ProviderFuture, RoundData, SnapshotSource, StalenessPolicy,
 };
 
 alloy_sol_types::sol! {
@@ -38,6 +39,7 @@ alloy_sol_types::sol! {
         uint80 answeredInRound
     );
     function aggregator() external view returns (address);
+    function typeAndVersion() external view returns (string);
 }
 
 const FEEDS: &[(&str, Address)] = &[
@@ -118,7 +120,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             )
             .await
         {
-            Ok(_) => {
+            Ok(id) => {
                 let snapshot = registry.latest(proxy).expect("registered snapshot");
                 println!(
                     "cold_start ok label={label} proxy={:?} aggregator={:?} answer={} updated_at={} status={:?}",
@@ -131,7 +133,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if matches!(snapshot.status, FeedStatus::Fresh)
                     && let Some(aggregator) = snapshot.aggregator
                 {
-                    registered.push((label.to_string(), proxy, aggregator));
+                    let registration = registry
+                        .registration(id)
+                        .expect("registration should be stored");
+                    let topic = if registration
+                        .aggregator_layout
+                        .as_ref()
+                        .is_some_and(|evidence| {
+                            evidence.layout == AggregatorLayout::ChainlinkOcr2V1
+                        }) {
+                        OCR2_NEW_TRANSMISSION_TOPIC
+                    } else {
+                        ANSWER_UPDATED_TOPIC
+                    };
+                    registered.push((label.to_string(), proxy, aggregator, topic));
                 }
             }
             Err(error) => {
@@ -162,7 +177,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &provider,
         registered
             .iter()
-            .map(|(_, _, aggregator)| *aggregator)
+            .map(|(_, _, aggregator, topic)| (*aggregator, *topic))
             .collect(),
         latest.saturating_sub(historical_lookback),
         latest,
@@ -214,7 +229,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &provider,
             registered
                 .iter()
-                .map(|(_, _, aggregator)| *aggregator)
+                .map(|(_, _, aggregator, topic)| (*aggregator, *topic))
                 .collect(),
             next_block,
             head,
@@ -371,11 +386,11 @@ fn context_for_log(
 
 async fn most_recent_log(
     provider: &RootProvider<AnyNetwork>,
-    aggregators: Vec<Address>,
+    routes: Vec<(Address, B256)>,
     from_block: u64,
     to_block: u64,
 ) -> Result<Option<RpcLog>, Box<dyn Error>> {
-    let mut logs = fetch_logs(provider, aggregators, from_block, to_block).await?;
+    let mut logs = fetch_logs(provider, routes, from_block, to_block).await?;
     logs.sort_by_key(|log| {
         (
             log.block_number.unwrap_or_default(),
@@ -387,19 +402,28 @@ async fn most_recent_log(
 
 async fn fetch_logs(
     provider: &RootProvider<AnyNetwork>,
-    aggregators: Vec<Address>,
+    routes: Vec<(Address, B256)>,
     from_block: u64,
     to_block: u64,
 ) -> Result<Vec<RpcLog>, Box<dyn Error>> {
-    if aggregators.is_empty() || from_block > to_block {
+    if routes.is_empty() || from_block > to_block {
         return Ok(Vec::new());
     }
-    let filter = Filter::new()
-        .address(aggregators)
-        .event_signature(ANSWER_UPDATED_TOPIC)
-        .from_block(from_block)
-        .to_block(to_block);
-    Ok(provider.get_logs(&filter).await?)
+    let mut by_topic: BTreeMap<B256, Vec<Address>> = BTreeMap::new();
+    for (aggregator, topic) in routes {
+        by_topic.entry(topic).or_default().push(aggregator);
+    }
+
+    let mut logs = Vec::new();
+    for (topic, aggregators) in by_topic {
+        let filter = Filter::new()
+            .address(aggregators)
+            .event_signature(topic)
+            .from_block(from_block)
+            .to_block(to_block);
+        logs.extend(provider.get_logs(&filter).await?);
+    }
+    Ok(logs)
 }
 
 async fn mocked_cache() -> EvmCache {
@@ -474,6 +498,24 @@ impl ChainlinkFeedProvider for RpcChainlinkProvider {
                 return Ok(None);
             };
             Ok(aggregatorCall::abi_decode_returns(&bytes).ok())
+        })
+    }
+
+    fn aggregator_type_and_version(
+        &self,
+        aggregator: Address,
+    ) -> ProviderFuture<'_, Option<String>> {
+        Box::pin(async move {
+            let Ok(bytes) = eth_call(
+                &self.provider,
+                aggregator,
+                typeAndVersionCall {}.abi_encode(),
+            )
+            .await
+            else {
+                return Ok(None);
+            };
+            Ok(typeAndVersionCall::abi_decode_returns(&bytes).ok())
         })
     }
 }

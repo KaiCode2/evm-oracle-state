@@ -57,4 +57,39 @@ pub trait ChainlinkFeedProvider {
     ) -> ProviderFuture<'_, Option<Address>> {
         self.aggregator(proxy)
     }
+
+    /// Best-effort read of the aggregator implementation `typeAndVersion()`.
+    ///
+    /// Providers that do not support implementation introspection may return
+    /// `Ok(None)`. Registration and reconciliation treat missing or failed
+    /// introspection as an unsupported layout and fall back to purge/refetch.
+    fn aggregator_type_and_version(
+        &self,
+        _aggregator: Address,
+    ) -> ProviderFuture<'_, Option<String>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Best-effort block-pinned read of the aggregator `typeAndVersion()`.
+    fn aggregator_type_and_version_at(
+        &self,
+        aggregator: Address,
+        _block: Option<OracleBlockRef>,
+    ) -> ProviderFuture<'_, Option<String>> {
+        self.aggregator_type_and_version(aggregator)
+    }
+
+    /// Best-effort read of the aggregator runtime code hash.
+    fn aggregator_code_hash(&self, _aggregator: Address) -> ProviderFuture<'_, Option<B256>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Best-effort block-pinned read of the aggregator runtime code hash.
+    fn aggregator_code_hash_at(
+        &self,
+        aggregator: Address,
+        _block: Option<OracleBlockRef>,
+    ) -> ProviderFuture<'_, Option<B256>> {
+        self.aggregator_code_hash(aggregator)
+    }
 }

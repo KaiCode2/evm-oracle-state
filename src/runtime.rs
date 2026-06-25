@@ -109,7 +109,7 @@ impl<P> OracleRuntimeBuilder<P> {
             provider,
             feeds: Vec::new(),
             now_timestamp: None,
-            storage_sync: OracleStorageSync::default(),
+            storage_sync: OracleStorageSync::chainlink_defaults(),
             callbacks: Vec::new(),
         }
     }
@@ -126,7 +126,7 @@ impl<P> OracleRuntimeBuilder<P> {
         self
     }
 
-    /// Add one verified storage adapter.
+    /// Add one storage adapter.
     pub fn storage_adapter<A>(mut self, adapter: A) -> Self
     where
         A: OracleStorageAdapter + 'static,

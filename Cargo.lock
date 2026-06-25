@@ -1767,6 +1767,7 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "evm-fork-cache",
+ "revm",
  "thiserror",
  "tokio",
  "tracing",

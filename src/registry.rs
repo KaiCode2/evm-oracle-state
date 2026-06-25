@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 
 use crate::{
-    ChainlinkFeedProvider, FeedConfig, FeedMetadata, OracleError, OracleSnapshot, RoundData,
+    AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence, ChainlinkFeedProvider,
+    FeedConfig, FeedMetadata, OracleBlockRef, OracleError, OracleSnapshot, RoundData,
+    classify_type_and_version,
 };
 
 /// Stable id for a registered feed.
@@ -45,6 +47,8 @@ pub struct FeedRegistration {
     pub staleness: crate::StalenessPolicy,
     /// Best-known current aggregator.
     pub current_aggregator: Option<Address>,
+    /// Best-known current aggregator layout evidence.
+    pub aggregator_layout: Option<AggregatorLayoutEvidence>,
     /// Metadata loaded from the proxy.
     pub metadata: FeedMetadata,
 }
@@ -68,6 +72,7 @@ pub struct OracleRegistry {
     registrations: BTreeMap<FeedId, FeedRegistration>,
     ids_by_proxy: BTreeMap<Address, FeedId>,
     snapshots_by_proxy: BTreeMap<Address, OracleSnapshot>,
+    layouts_by_code_hash: BTreeMap<B256, AggregatorLayout>,
     now_timestamp: u64,
 }
 
@@ -78,6 +83,7 @@ impl OracleRegistry {
             registrations: BTreeMap::new(),
             ids_by_proxy: BTreeMap::new(),
             snapshots_by_proxy: BTreeMap::new(),
+            layouts_by_code_hash: BTreeMap::new(),
             now_timestamp,
         }
     }
@@ -106,6 +112,9 @@ impl OracleRegistry {
         };
         let round = provider.latest_round_data(config.proxy).await?;
         let current_aggregator = provider.aggregator(config.proxy).await.unwrap_or(None);
+        let aggregator_layout = self
+            .detect_aggregator_layout(provider, current_aggregator, None)
+            .await;
 
         let registration = FeedRegistration {
             id,
@@ -115,6 +124,7 @@ impl OracleRegistry {
             quote: config.quote,
             staleness: config.staleness,
             current_aggregator,
+            aggregator_layout,
             metadata: metadata.clone(),
         };
         let snapshot = OracleSnapshot::proxy_read(
@@ -171,10 +181,64 @@ impl OracleRegistry {
         self.snapshots_by_proxy.insert(snapshot.proxy, snapshot);
     }
 
+    pub(crate) async fn detect_aggregator_layout<P: ChainlinkFeedProvider>(
+        &mut self,
+        provider: &P,
+        aggregator: Option<Address>,
+        block: Option<OracleBlockRef>,
+    ) -> Option<AggregatorLayoutEvidence> {
+        let aggregator = aggregator?;
+        let code_hash = provider
+            .aggregator_code_hash_at(aggregator, block)
+            .await
+            .unwrap_or(None);
+        let type_and_version = provider
+            .aggregator_type_and_version_at(aggregator, block)
+            .await
+            .unwrap_or(None);
+
+        if let Some(type_and_version) = type_and_version {
+            let layout = classify_type_and_version(&type_and_version);
+            if let Some(code_hash) = code_hash
+                && is_cacheable_layout(layout)
+            {
+                self.layouts_by_code_hash.insert(code_hash, layout);
+            }
+            return Some(AggregatorLayoutEvidence {
+                aggregator,
+                type_and_version: Some(type_and_version),
+                code_hash,
+                layout,
+                confidence: AggregatorLayoutConfidence::TypeAndVersion,
+            });
+        }
+
+        if let Some(code_hash) = code_hash {
+            if let Some(layout) = self.layouts_by_code_hash.get(&code_hash).copied() {
+                return Some(AggregatorLayoutEvidence::from_code_hash_cache(
+                    aggregator, code_hash, layout,
+                ));
+            }
+            return Some(AggregatorLayoutEvidence::unknown(
+                aggregator,
+                Some(code_hash),
+            ));
+        }
+
+        Some(AggregatorLayoutEvidence::unknown(aggregator, None))
+    }
+
     /// Return cloned registrations for routing rebuilds.
     pub fn registrations(&self) -> impl Iterator<Item = FeedRegistration> + '_ {
         self.registrations.values().cloned()
     }
+}
+
+fn is_cacheable_layout(layout: AggregatorLayout) -> bool {
+    matches!(
+        layout,
+        AggregatorLayout::ChainlinkOcr2V1 | AggregatorLayout::ChainlinkOcr1V4
+    )
 }
 
 pub(crate) fn snapshot_from_proxy_read(

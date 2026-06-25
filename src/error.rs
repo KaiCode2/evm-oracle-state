@@ -35,6 +35,14 @@ pub enum ChainlinkEventDecodeError {
         /// Encoded value.
         value: alloy_primitives::U256,
     },
+    /// ABI decoding failed for a dynamic or typed event payload.
+    #[error("failed to decode event `{event}`: {message}")]
+    AbiDecode {
+        /// Event name.
+        event: &'static str,
+        /// Decoder error message.
+        message: String,
+    },
 }
 
 /// Errors returned by registry, reconciliation, and report application.
