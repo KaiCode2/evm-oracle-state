@@ -1,0 +1,46 @@
+//! Chainlink-style oracle state tracking over `evm-fork-cache`.
+//!
+//! Events are treated as low-latency hints. Proxy reads through
+//! `latestRoundData()` are the authoritative state and should be used for
+//! startup, periodic reconciliation, and repair after gaps or reorgs.
+
+mod config;
+mod error;
+mod events;
+mod overlay;
+mod price;
+mod provider;
+mod reactive;
+mod registry;
+mod runtime;
+mod signal;
+mod state;
+mod storage;
+mod tracker;
+
+pub use config::{FeedConfig, StalenessPolicy};
+pub use error::{ChainlinkEventDecodeError, OracleError, OracleSignalDecodeError};
+pub use events::{
+    ANSWER_UPDATED_TOPIC, AnswerUpdated, NEW_ROUND_TOPIC, NewRound, decode_answer_updated,
+    decode_new_round,
+};
+pub use overlay::OracleReadOverlay;
+pub use price::OraclePrice;
+pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
+pub use reactive::OracleReactiveHandler;
+pub use registry::{AggregatorChange, FeedId, FeedRegistration, OracleRegistry};
+pub use runtime::{ChainlinkFeed, OracleRuntime, OracleRuntimeBuilder};
+pub use signal::{
+    ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE, OracleSignal, OracleSignalKind,
+};
+pub use state::{
+    FeedMetadata, FeedStatus, OracleSnapshot, OracleSnapshotStatus, RoundData, SnapshotSource,
+};
+pub use storage::{
+    OracleStorageAdapter, OracleStorageEffect, OracleStorageError, OracleStorageSync,
+};
+pub use tracker::{
+    OracleAggregatorChanged, OracleHookEvent, OraclePriceConfirmed, OraclePriceCorrected,
+    OraclePriceStale, OraclePriceUpdate, OracleReconciler, OracleReconciliationRequest,
+    OracleReconciliationResult, OracleTracker, OracleUpdate, ReconcileReport,
+};

@@ -1,0 +1,44 @@
+[package]
+name = "evm-oracle-state"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "EVM-backed Chainlink-style oracle state tracking over evm-fork-cache"
+keywords = ["evm", "oracle", "chainlink", "defi"]
+categories = ["cryptography::cryptocurrencies", "simulation", "caching"]
+readme = "README.md"
+repository = "https://github.com/KaiCode2/evm-oracle-state"
+documentation = "https://docs.rs/evm-oracle-state"
+
+# Standalone workspace root: keeps this crate from being absorbed by any
+# ancestor-directory workspace and gives it its own Cargo.lock.
+[workspace]
+
+[features]
+default = ["chainlink", "reactive"]
+chainlink = []
+reactive = []
+live-tests = ["alloy-provider/ws"]
+
+[dependencies]
+# INTERIM: match evm-amm-state while the reactive runtime is not available from
+# the local sibling checkout or crates.io release.
+evm-fork-cache = { git = "ssh://git@github.com/KaiCode2/evm-fork-cache.git", rev = "903af3df887bf5718693d4bacf770552681e5273", version = "0.1" }
+
+alloy-eips = "1.0.38"
+alloy-network = "1.0.38"
+alloy-primitives = { version = "1.4", features = ["map"] }
+alloy-provider = "1.0.38"
+alloy-rpc-types-eth = "1.0.38"
+alloy-sol-types = "1.4"
+
+thiserror = "2.0"
+tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+tracing = "0.1.41"
+
+[dev-dependencies]
+alloy-provider = { version = "1.0.38", features = ["ws"] }
+alloy-rpc-client = "1.0.38"
+alloy-transport = "1.0.38"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
