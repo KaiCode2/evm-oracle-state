@@ -14,11 +14,11 @@ use evm_fork_cache::{
 };
 
 use crate::{
-    ANSWER_UPDATED_TOPIC, FeedRegistration, OCR2_NEW_TRANSMISSION_TOPIC,
-    ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE, Ocr2TransmissionStorageUpdate,
-    OraclePriceUpdate, OracleSignalKind, OracleSnapshotStatus, OracleStorageEffect,
-    OracleStorageSync, OracleUpdate, RoundData, decode_answer_updated,
-    decode_ocr2_new_transmission,
+    ANSWER_UPDATED_TOPIC, FeedRegistration, OCR1_NEW_TRANSMISSION_TOPIC,
+    OCR2_NEW_TRANSMISSION_TOPIC, ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE,
+    Ocr1TransmissionStorageUpdate, Ocr2TransmissionStorageUpdate, OraclePriceUpdate,
+    OracleSignalKind, OracleSnapshotStatus, OracleStorageEffect, OracleStorageSync, OracleUpdate,
+    RoundData, decode_answer_updated, decode_ocr1_new_transmission, decode_ocr2_new_transmission,
 };
 
 const HANDLER_ID: &str = "evm-oracle-state.chainlink";
@@ -70,14 +70,24 @@ impl OracleReactiveHandler {
                 self.storage_sync
                     .prefers_ocr2_new_transmission(registration)
             });
+            let wants_ocr1 = registrations.iter().any(|registration| {
+                self.storage_sync
+                    .prefers_ocr1_new_transmission(registration)
+            });
             let wants_answer = registrations.iter().any(|registration| {
                 !self
                     .storage_sync
                     .prefers_ocr2_new_transmission(registration)
+                    && !self
+                        .storage_sync
+                        .prefers_ocr1_new_transmission(registration)
             });
 
             if wants_answer {
                 interests.push(log_interest(*aggregator, ANSWER_UPDATED_TOPIC));
+            }
+            if wants_ocr1 {
+                interests.push(log_interest(*aggregator, OCR1_NEW_TRANSMISSION_TOPIC));
             }
             if wants_ocr2 {
                 interests.push(log_interest(*aggregator, OCR2_NEW_TRANSMISSION_TOPIC));
@@ -125,6 +135,9 @@ impl OracleReactiveHandler {
             if self
                 .storage_sync
                 .prefers_ocr2_new_transmission(registration)
+                || self
+                    .storage_sync
+                    .prefers_ocr1_new_transmission(registration)
             {
                 continue;
             }
@@ -305,6 +318,108 @@ impl OracleReactiveHandler {
             tags,
         })
     }
+
+    fn handle_ocr1_new_transmission(
+        &self,
+        ctx: &ReactiveContext,
+        log: &alloy_rpc_types_eth::Log,
+        state: &dyn StateView,
+    ) -> Result<HandlerOutcome, HandlerError> {
+        let aggregator = log.address();
+        let Some(registrations) = self.registrations_by_aggregator.get(&aggregator) else {
+            return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
+        };
+
+        let event = decode_ocr1_new_transmission(log).map_err(|error| {
+            HandlerError::new(format!("decode OCR1 NewTransmission failed: {error}"))
+        })?;
+        let transmission_timestamp = ctx
+            .block
+            .as_ref()
+            .and_then(|block| block.timestamp)
+            .or(log.block_timestamp)
+            .ok_or_else(|| {
+                HandlerError::new("OCR1 NewTransmission handling requires block timestamp")
+            })?;
+        let block_number = event
+            .block_number
+            .or_else(|| ctx.block.as_ref().map(|block| block.number));
+        let block_hash = log
+            .block_hash
+            .or_else(|| ctx.block.as_ref().map(|block| block.hash));
+        let log_index = event.log_index.or(ctx.log_index);
+
+        let mut effects = Vec::new();
+        let mut tags = Vec::new();
+        let mut needs_aggregator_purge = false;
+        let mut handled_any = false;
+
+        for registration in registrations {
+            if !self
+                .storage_sync
+                .prefers_ocr1_new_transmission(registration)
+            {
+                continue;
+            }
+            handled_any = true;
+
+            let price_update = OraclePriceUpdate {
+                id: registration.id,
+                proxy: registration.proxy,
+                aggregator,
+                label: registration.label.clone(),
+                base: registration.base.clone(),
+                quote: registration.quote.clone(),
+                raw_answer: event.answer,
+                decimals: registration.metadata.decimals,
+                event_round_id: event.aggregator_round_id,
+                started_at: transmission_timestamp,
+                updated_at: transmission_timestamp,
+                block_number,
+                block_hash,
+                log_index,
+                confidence: if log.removed {
+                    OracleSnapshotStatus::Unknown
+                } else {
+                    OracleSnapshotStatus::EventPending
+                },
+            };
+            let transmission_update = Ocr1TransmissionStorageUpdate {
+                aggregator,
+                aggregator_round_id: event.aggregator_round_id,
+                answer: event.answer,
+                transmission_timestamp,
+                epoch_and_round: event.epoch_and_round,
+            };
+            apply_storage_effect(
+                &mut effects,
+                &mut needs_aggregator_purge,
+                registration.proxy,
+                self.storage_sync
+                    .state_effect_for_ocr1_transmission(registration, &transmission_update, state)
+                    .map_err(|error| HandlerError::new(format!("{error}")))?,
+            );
+            let hook_tags = hook_tags(registration, aggregator);
+            tags.extend(hook_tags.clone());
+            effects.push(ReactiveEffect::Hook(HookSignal {
+                namespace: Cow::Borrowed(ORACLE_SIGNAL_NAMESPACE),
+                kind: Cow::Borrowed(OracleSignalKind::PriceUpdate.as_str()),
+                labels: hook_tags,
+                payload: Some(Arc::new(price_update)),
+            }));
+        }
+
+        if !handled_any {
+            return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
+        }
+        prepend_aggregator_purge(&mut effects, needs_aggregator_purge, aggregator);
+
+        Ok(HandlerOutcome {
+            effects,
+            quality: StateEffectQuality::RequiresRepair,
+            tags,
+        })
+    }
 }
 
 fn log_interest(aggregator: Address, topic: B256) -> ReactiveInterest<Ethereum> {
@@ -385,6 +500,7 @@ impl ReactiveHandler<Ethereum> for OracleReactiveHandler {
 
         match log.topics().first().copied() {
             Some(ANSWER_UPDATED_TOPIC) => self.handle_answer_updated(ctx, log, state),
+            Some(OCR1_NEW_TRANSMISSION_TOPIC) => self.handle_ocr1_new_transmission(ctx, log, state),
             Some(OCR2_NEW_TRANSMISSION_TOPIC) => self.handle_ocr2_new_transmission(ctx, log, state),
             _ => Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect)),
         }

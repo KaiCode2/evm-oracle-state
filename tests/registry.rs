@@ -199,6 +199,64 @@ async fn register_detects_ocr2_layout_from_type_and_version() {
 }
 
 #[tokio::test]
+async fn register_detects_ocr1_layout_variants_from_type_and_version() {
+    let now = 1_700_004_000;
+
+    for (type_and_version, expected) in [
+        (
+            "AccessControlledOffchainAggregator 2.0.0",
+            AggregatorLayout::ChainlinkOcr1V2,
+        ),
+        (
+            "AccessControlledOffchainAggregator 3.0.0",
+            AggregatorLayout::ChainlinkOcr1V3,
+        ),
+        (
+            "AccessControlledOffchainAggregator 4.0.0",
+            AggregatorLayout::ChainlinkOcr1V4,
+        ),
+        (
+            "OffchainAggregator 3.0.0",
+            AggregatorLayout::ChainlinkOcr1V3,
+        ),
+    ] {
+        let feed = fixture_for(
+            Address::from([expected as u8 + 0x10; 20]),
+            Some(Address::from([expected as u8 + 0x20; 20])),
+            round(250_000_000_000, now - 120),
+        );
+        let provider = MockProvider::new(feed.clone()).with_type_and_version(type_and_version);
+        let mut registry = OracleRegistry::new_at_timestamp(now);
+
+        let id = registry
+            .register_chainlink_feed(
+                &provider,
+                FeedConfig {
+                    proxy: feed.proxy,
+                    label: Some(type_and_version.to_string()),
+                    staleness: StalenessPolicy::max_age(60 * 60),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("registration should detect OCR1 layout");
+
+        let evidence = registry
+            .registration(id)
+            .expect("registered feed")
+            .aggregator_layout
+            .as_ref()
+            .expect("layout evidence");
+        assert_eq!(evidence.layout, expected);
+        assert_eq!(
+            evidence.confidence,
+            AggregatorLayoutConfidence::TypeAndVersion
+        );
+        assert_eq!(evidence.type_and_version.as_deref(), Some(type_and_version));
+    }
+}
+
+#[tokio::test]
 async fn register_can_use_cached_code_hash_layout_when_type_and_version_is_missing() {
     let now = 1_700_004_000;
     let code_hash = B256::repeat_byte(0x42);

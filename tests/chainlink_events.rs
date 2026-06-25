@@ -1,11 +1,13 @@
 use alloy_primitives::{
-    Address, B256, Bytes, I256, Log as PrimitiveLog, U256, aliases::I192, aliases::U40, keccak256,
+    Address, B256, Bytes, FixedBytes, I256, Log as PrimitiveLog, U256, aliases::I192, aliases::U40,
+    keccak256,
 };
 use alloy_rpc_types_eth::Log as RpcLog;
 use alloy_sol_types::SolEvent;
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, AnswerUpdated, ChainlinkEventDecodeError, NEW_ROUND_TOPIC, NewRound,
-    OCR2_NEW_TRANSMISSION_TOPIC, Ocr2NewTransmission, decode_answer_updated, decode_new_round,
+    OCR1_NEW_TRANSMISSION_TOPIC, OCR2_NEW_TRANSMISSION_TOPIC, Ocr1NewTransmission,
+    Ocr2NewTransmission, decode_answer_updated, decode_new_round, decode_ocr1_new_transmission,
     decode_ocr2_new_transmission,
 };
 
@@ -21,6 +23,19 @@ alloy_sol_types::sol! {
         bytes32 configDigest,
         uint40 epochAndRound
     );
+}
+
+mod ocr1_fixture {
+    alloy_sol_types::sol! {
+        event NewTransmission(
+            uint32 indexed aggregatorRoundId,
+            int192 answer,
+            address transmitter,
+            int192[] observations,
+            bytes observers,
+            bytes32 rawReportContext
+        );
+    }
 }
 
 fn rpc_log(address: Address, topics: Vec<B256>, data: Vec<u8>) -> RpcLog {
@@ -54,6 +69,13 @@ fn address_topic(address: Address) -> B256 {
     B256::from(bytes)
 }
 
+fn raw_report_context(config_digest: [u8; 16], epoch_and_round: u64) -> B256 {
+    let mut bytes = [0_u8; 32];
+    bytes[11..27].copy_from_slice(&config_digest);
+    bytes[27..].copy_from_slice(&epoch_and_round.to_be_bytes()[3..]);
+    B256::from(bytes)
+}
+
 #[test]
 fn exposes_chainlink_event_topics() {
     assert_eq!(
@@ -69,6 +91,10 @@ fn exposes_chainlink_event_topics() {
         keccak256(
             "NewTransmission(uint32,int192,address,uint32,int192[],bytes,int192,bytes32,uint40)"
         )
+    );
+    assert_eq!(
+        OCR1_NEW_TRANSMISSION_TOPIC,
+        keccak256("NewTransmission(uint32,int192,address,int192[],bytes,bytes32)")
     );
 }
 
@@ -129,6 +155,46 @@ fn decodes_new_round_for_observability() {
             round_id,
             started_by,
             started_at: 1_700_000_456,
+            block_number: Some(100),
+            log_index: Some(3),
+            removed: false,
+        }
+    );
+}
+
+#[test]
+fn decodes_ocr1_new_transmission_with_epoch_and_round_source() {
+    let aggregator = Address::repeat_byte(0x55);
+    let transmitter = Address::repeat_byte(0x66);
+    let raw_context = raw_report_context([0x77; 16], 0x1a_89_04);
+    let config_digest = FixedBytes::<16>::from([0x77; 16]);
+    let event = ocr1_fixture::NewTransmission {
+        aggregatorRoundId: 42,
+        answer: I192::try_from(-123_i64).expect("answer fits int192"),
+        transmitter,
+        observations: vec![I192::try_from(-120_i64).expect("observation fits int192")],
+        observers: Bytes::from(vec![0x01]),
+        rawReportContext: raw_context,
+    };
+    let log = rpc_log(
+        aggregator,
+        vec![OCR1_NEW_TRANSMISSION_TOPIC, uint_topic(U256::from(42_u64))],
+        event.encode_data().to_vec(),
+    );
+
+    let decoded =
+        decode_ocr1_new_transmission(&log).expect("valid OCR1 NewTransmission log should decode");
+
+    assert_eq!(
+        decoded,
+        Ocr1NewTransmission {
+            aggregator,
+            aggregator_round_id: U256::from(42_u64),
+            answer: I256::unchecked_from(-123_i64),
+            transmitter,
+            raw_report_context: raw_context,
+            config_digest,
+            epoch_and_round: 0x1a_89_04,
             block_number: Some(100),
             log_index: Some(3),
             removed: false,

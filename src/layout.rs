@@ -5,6 +5,10 @@ use alloy_primitives::{Address, B256};
 pub enum AggregatorLayout {
     /// Chainlink OCR2 `AccessControlledOCR2Aggregator 1.0.0` compatible layout.
     ChainlinkOcr2V1,
+    /// Chainlink OCR1 `AccessControlledOffchainAggregator 2.0.0` compatible layout.
+    ChainlinkOcr1V2,
+    /// Chainlink OCR1 `AccessControlledOffchainAggregator 3.0.0` compatible layout.
+    ChainlinkOcr1V3,
     /// Chainlink OCR1 `AccessControlledOffchainAggregator 4.0.0` compatible layout.
     ChainlinkOcr1V4,
     /// The aggregator exposed a version string, but this crate has no direct
@@ -87,6 +91,16 @@ impl AggregatorLayoutEvidence {
     pub fn is_chainlink_ocr2_v1(&self) -> bool {
         self.layout == AggregatorLayout::ChainlinkOcr2V1
     }
+
+    /// Return true when the evidence supports a Chainlink OCR1 direct-storage layout.
+    pub fn is_chainlink_ocr1(&self) -> bool {
+        matches!(
+            self.layout,
+            AggregatorLayout::ChainlinkOcr1V2
+                | AggregatorLayout::ChainlinkOcr1V3
+                | AggregatorLayout::ChainlinkOcr1V4
+        )
+    }
 }
 
 /// Classify a Chainlink-style `typeAndVersion()` string.
@@ -94,6 +108,12 @@ pub fn classify_type_and_version(type_and_version: &str) -> AggregatorLayout {
     match type_and_version.trim() {
         "AccessControlledOCR2Aggregator 1.0.0" | "OCR2Aggregator 1.0.0" => {
             AggregatorLayout::ChainlinkOcr2V1
+        }
+        "AccessControlledOffchainAggregator 2.0.0" | "OffchainAggregator 2.0.0" => {
+            AggregatorLayout::ChainlinkOcr1V2
+        }
+        "AccessControlledOffchainAggregator 3.0.0" | "OffchainAggregator 3.0.0" => {
+            AggregatorLayout::ChainlinkOcr1V3
         }
         "AccessControlledOffchainAggregator 4.0.0" | "OffchainAggregator 4.0.0" => {
             AggregatorLayout::ChainlinkOcr1V4

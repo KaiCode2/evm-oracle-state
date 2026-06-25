@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, B256, I256, U256, b256};
+use alloy_primitives::{Address, B256, FixedBytes, I256, U256, b256};
 use alloy_rpc_types_eth::Log as RpcLog;
 use alloy_sol_types::SolEvent;
 
@@ -16,6 +16,23 @@ pub const NEW_ROUND_TOPIC: B256 =
 pub const OCR2_NEW_TRANSMISSION_TOPIC: B256 =
     b256!("c797025feeeaf2cd924c99e9205acb8ec04d5cad21c41ce637a38fb6dee6016a");
 
+/// OCR1 `NewTransmission(uint32,int192,address,int192[],bytes,bytes32)` topic0.
+pub const OCR1_NEW_TRANSMISSION_TOPIC: B256 =
+    b256!("f6a97944f31ea060dfde0566e4167c1a1082551e64b60ecb14d599a9d023d451");
+
+mod ocr1_abi {
+    alloy_sol_types::sol! {
+        event NewTransmission(
+            uint32 indexed aggregatorRoundId,
+            int192 answer,
+            address transmitter,
+            int192[] observations,
+            bytes observers,
+            bytes32 rawReportContext
+        );
+    }
+}
+
 mod ocr2_abi {
     alloy_sol_types::sol! {
         event NewTransmission(
@@ -30,6 +47,31 @@ mod ocr2_abi {
             uint40 epochAndRound
         );
     }
+}
+
+/// Decoded Chainlink OCR1 `NewTransmission` event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ocr1NewTransmission {
+    /// Emitting aggregator address.
+    pub aggregator: Address,
+    /// Aggregator-local round id.
+    pub aggregator_round_id: U256,
+    /// OCR1 median answer.
+    pub answer: I256,
+    /// Address that transmitted the report.
+    pub transmitter: Address,
+    /// OCR1 raw report context.
+    pub raw_report_context: B256,
+    /// OCR1 config digest extracted from `rawReportContext`.
+    pub config_digest: FixedBytes<16>,
+    /// OCR1 epoch and round packed as uint40.
+    pub epoch_and_round: u64,
+    /// Log block number, when present.
+    pub block_number: Option<u64>,
+    /// Log index, when present.
+    pub log_index: Option<u64>,
+    /// Whether the provider marked the log as removed.
+    pub removed: bool,
 }
 
 /// Decoded Chainlink `AnswerUpdated` event.
@@ -105,6 +147,33 @@ pub fn decode_answer_updated(log: &RpcLog) -> Result<AnswerUpdated, ChainlinkEve
         current: topic_i256(log.topics()[1]),
         round_id: topic_u256(log.topics()[2]),
         updated_at: u256_to_u64(data, "updated_at")?,
+        block_number: log.block_number,
+        log_index: log.log_index,
+        removed: log.removed,
+    })
+}
+
+/// Decode a Chainlink OCR1 `NewTransmission` log.
+pub fn decode_ocr1_new_transmission(
+    log: &RpcLog,
+) -> Result<Ocr1NewTransmission, ChainlinkEventDecodeError> {
+    require_topic(log, OCR1_NEW_TRANSMISSION_TOPIC)?;
+    require_topic_count(log, 2)?;
+    let decoded = ocr1_abi::NewTransmission::decode_log_validate(&log.inner).map_err(|error| {
+        ChainlinkEventDecodeError::AbiDecode {
+            event: "NewTransmission",
+            message: error.to_string(),
+        }
+    })?;
+    let data = decoded.data;
+    Ok(Ocr1NewTransmission {
+        aggregator: log.address(),
+        aggregator_round_id: U256::from(data.aggregatorRoundId),
+        answer: int192_to_i256(data.answer),
+        transmitter: data.transmitter,
+        raw_report_context: data.rawReportContext,
+        config_digest: ocr1_config_digest(data.rawReportContext),
+        epoch_and_round: u40_from_context(data.rawReportContext),
         block_number: log.block_number,
         log_index: log.log_index,
         removed: log.removed,
@@ -205,6 +274,19 @@ fn int192_to_i256(value: alloy_primitives::Signed<192, 3>) -> I256 {
         limbs[3] = u64::MAX;
     }
     I256::from_raw(U256::from_limbs(limbs))
+}
+
+fn ocr1_config_digest(raw_report_context: B256) -> FixedBytes<16> {
+    let mut digest = [0_u8; 16];
+    digest.copy_from_slice(&raw_report_context.as_slice()[11..27]);
+    FixedBytes::from(digest)
+}
+
+fn u40_from_context(raw_report_context: B256) -> u64 {
+    let bytes = raw_report_context.as_slice();
+    u64::from_be_bytes([
+        0, 0, 0, bytes[27], bytes[28], bytes[29], bytes[30], bytes[31],
+    ])
 }
 
 fn u256_to_u64(value: U256, field: &'static str) -> Result<u64, ChainlinkEventDecodeError> {

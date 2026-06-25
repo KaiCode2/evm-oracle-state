@@ -12,6 +12,11 @@ const OCR2_LATEST_EPOCH_AND_ROUND_OFFSET_BITS: usize = 8;
 const OCR2_LATEST_AGGREGATOR_ROUND_ID_OFFSET_BITS: usize = 6 * 8;
 const OCR2_TRANSMISSION_OBSERVATIONS_TIMESTAMP_OFFSET_BITS: usize = 24 * 8;
 const OCR2_TRANSMISSION_TIMESTAMP_OFFSET_BITS: usize = 28 * 8;
+const OCR1_HOT_VARS_SLOT: u64 = 43;
+const OCR1_TRANSMISSIONS_SLOT: u64 = 44;
+const OCR1_LATEST_EPOCH_AND_ROUND_OFFSET_BITS: usize = 16 * 8;
+const OCR1_LATEST_AGGREGATOR_ROUND_ID_OFFSET_BITS: usize = 22 * 8;
+const OCR1_TRANSMISSION_TIMESTAMP_OFFSET_BITS: usize = 24 * 8;
 const UINT32_BITS: usize = 32;
 const UINT40_BITS: usize = 40;
 const INT192_BITS: usize = 192;
@@ -69,6 +74,21 @@ pub struct Ocr2TransmissionStorageUpdate {
     pub epoch_and_round: u64,
 }
 
+/// OCR1 transmission data that can be translated into exact aggregator storage writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ocr1TransmissionStorageUpdate {
+    /// Emitting aggregator address.
+    pub aggregator: Address,
+    /// Aggregator-local round id.
+    pub aggregator_round_id: U256,
+    /// OCR1 median answer.
+    pub answer: I256,
+    /// On-chain transmission timestamp, stored as both `startedAt` and `updatedAt`.
+    pub transmission_timestamp: u64,
+    /// OCR1 packed epoch and round.
+    pub epoch_and_round: u64,
+}
+
 /// Adapter that can translate oracle events into direct EVM cache state updates.
 ///
 /// Implementations must be deployment-layout specific. Returning `Ok(None)`
@@ -96,8 +116,23 @@ pub trait OracleStorageAdapter: Send + Sync {
         Ok(None)
     }
 
+    /// Produce direct state updates for a detected OCR1 `NewTransmission` event.
+    fn state_updates_for_ocr1_transmission(
+        &self,
+        _registration: &FeedRegistration,
+        _update: &Ocr1TransmissionStorageUpdate,
+        _state: &dyn StateView,
+    ) -> Result<Option<Vec<StateUpdate>>, OracleStorageError> {
+        Ok(None)
+    }
+
     /// Return true when this adapter wants OCR2 `NewTransmission` as the primary event.
     fn prefers_ocr2_new_transmission(&self, _registration: &FeedRegistration) -> bool {
+        false
+    }
+
+    /// Return true when this adapter wants OCR1 `NewTransmission` as the primary event.
+    fn prefers_ocr1_new_transmission(&self, _registration: &FeedRegistration) -> bool {
         false
     }
 }
@@ -321,6 +356,151 @@ fn registration_supports_ocr2(registration: &FeedRegistration, aggregator: Addre
         .is_some_and(|layout| layout.aggregator == aggregator && layout.is_chainlink_ocr2_v1())
 }
 
+/// Verified direct-storage adapter for Chainlink OCR1 aggregators.
+///
+/// This adapter targets the common `AccessControlledOffchainAggregator`
+/// 2.x/3.x/4.x storage layout:
+///
+/// - `s_hotVars` at slot 43, with `latestEpochAndRound` packed at byte offset
+///   16 and `latestAggregatorRoundId` packed at byte offset 22.
+/// - `s_transmissions` at slot 44, keyed by the aggregator-local `uint32`
+///   round id, storing `Transmission { int192 answer; uint64 timestamp; }`.
+///
+/// OCR1 `NewTransmission` does not carry a separate observations timestamp, so
+/// the block timestamp is used for both `startedAt` and `updatedAt`, matching
+/// the OCR1 `latestRoundData()` implementation.
+#[derive(Clone, Debug, Default)]
+pub struct ChainlinkOcr1StorageAdapter;
+
+impl ChainlinkOcr1StorageAdapter {
+    const NAME: &'static str = "chainlink-ocr1";
+
+    /// Create an OCR1 storage adapter.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Storage slot for OCR1 `s_hotVars`.
+    pub fn hot_vars_slot() -> U256 {
+        U256::from(OCR1_HOT_VARS_SLOT)
+    }
+
+    /// Mask selecting the packed `s_hotVars.latestAggregatorRoundId` field.
+    pub fn latest_aggregator_round_id_mask() -> U256 {
+        uint_mask(UINT32_BITS) << OCR1_LATEST_AGGREGATOR_ROUND_ID_OFFSET_BITS
+    }
+
+    /// Mask selecting the packed `s_hotVars.latestEpochAndRound` field.
+    pub fn latest_epoch_and_round_mask() -> U256 {
+        uint_mask(UINT40_BITS) << OCR1_LATEST_EPOCH_AND_ROUND_OFFSET_BITS
+    }
+
+    /// Masked value for `s_hotVars.latestAggregatorRoundId`.
+    pub fn latest_aggregator_round_id_value(round_id: u32) -> U256 {
+        U256::from(round_id) << OCR1_LATEST_AGGREGATOR_ROUND_ID_OFFSET_BITS
+    }
+
+    /// Masked value for `s_hotVars.latestEpochAndRound`.
+    pub fn latest_epoch_and_round_value(epoch_and_round: u64) -> Result<U256, OracleStorageError> {
+        if epoch_and_round > uint_mask_u64(UINT40_BITS) {
+            return Err(OracleStorageError::adapter(
+                Self::NAME,
+                format!("OCR1 epochAndRound {epoch_and_round} does not fit uint40"),
+            ));
+        }
+
+        Ok(U256::from(epoch_and_round) << OCR1_LATEST_EPOCH_AND_ROUND_OFFSET_BITS)
+    }
+
+    /// Mapping slot for OCR1 `s_transmissions[round_id]`.
+    pub fn transmission_slot(round_id: u32) -> U256 {
+        mapping_slot(U256::from(round_id), U256::from(OCR1_TRANSMISSIONS_SLOT))
+    }
+
+    /// Pack an OCR1 transmission word.
+    pub fn pack_transmission(
+        answer: I256,
+        transmission_timestamp: u64,
+    ) -> Result<U256, OracleStorageError> {
+        let answer = encode_int192_with_adapter(answer, Self::NAME, "OCR1")?;
+        Ok(
+            answer
+                | (U256::from(transmission_timestamp) << OCR1_TRANSMISSION_TIMESTAMP_OFFSET_BITS),
+        )
+    }
+}
+
+impl OracleStorageAdapter for ChainlinkOcr1StorageAdapter {
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn state_updates_for_answer(
+        &self,
+        _registration: &FeedRegistration,
+        _update: &OraclePriceUpdate,
+        _state: &dyn StateView,
+    ) -> Result<Option<Vec<StateUpdate>>, OracleStorageError> {
+        Ok(None)
+    }
+
+    fn state_updates_for_ocr1_transmission(
+        &self,
+        registration: &FeedRegistration,
+        update: &Ocr1TransmissionStorageUpdate,
+        state: &dyn StateView,
+    ) -> Result<Option<Vec<StateUpdate>>, OracleStorageError> {
+        let Some(aggregator) = registration.current_aggregator else {
+            return Ok(None);
+        };
+        if update.aggregator != aggregator || !registration_supports_ocr1(registration, aggregator)
+        {
+            return Ok(None);
+        }
+        if state.storage(aggregator, Self::hot_vars_slot()).is_none() {
+            return Ok(None);
+        }
+
+        let round_id = u32::try_from(update.aggregator_round_id).map_err(|_| {
+            OracleStorageError::adapter(
+                Self::NAME,
+                format!(
+                    "OCR1 round id {} does not fit aggregator-local uint32",
+                    update.aggregator_round_id
+                ),
+            )
+        })?;
+        let hot_vars_mask =
+            Self::latest_epoch_and_round_mask() | Self::latest_aggregator_round_id_mask();
+        let hot_vars_value = Self::latest_epoch_and_round_value(update.epoch_and_round)?
+            | Self::latest_aggregator_round_id_value(round_id);
+        let transmission = Self::pack_transmission(update.answer, update.transmission_timestamp)?;
+
+        Ok(Some(vec![
+            StateUpdate::slot_masked(
+                aggregator,
+                Self::hot_vars_slot(),
+                hot_vars_mask,
+                hot_vars_value,
+            ),
+            StateUpdate::slot(aggregator, Self::transmission_slot(round_id), transmission),
+        ]))
+    }
+
+    fn prefers_ocr1_new_transmission(&self, registration: &FeedRegistration) -> bool {
+        registration
+            .current_aggregator
+            .is_some_and(|aggregator| registration_supports_ocr1(registration, aggregator))
+    }
+}
+
+fn registration_supports_ocr1(registration: &FeedRegistration, aggregator: Address) -> bool {
+    registration
+        .aggregator_layout
+        .as_ref()
+        .is_some_and(|layout| layout.aggregator == aggregator && layout.is_chainlink_ocr1())
+}
+
 /// Ordered collection of oracle storage adapters.
 #[derive(Clone, Default)]
 pub struct OracleStorageSync {
@@ -343,7 +523,9 @@ impl OracleStorageSync {
 
     /// Create a storage sync registry with built-in Chainlink layout adapters.
     pub fn chainlink_defaults() -> Self {
-        Self::new().with_adapter(Arc::new(ChainlinkOcr2StorageAdapter::new()))
+        Self::new()
+            .with_adapter(Arc::new(ChainlinkOcr2StorageAdapter::new()))
+            .with_adapter(Arc::new(ChainlinkOcr1StorageAdapter::new()))
     }
 
     /// Create a storage sync registry with one adapter appended.
@@ -402,11 +584,39 @@ impl OracleStorageSync {
         Ok(OracleStorageEffect::FallbackPurge)
     }
 
+    /// Try adapters in order for an OCR1 transmission, falling back to purge/refetch.
+    pub fn state_effect_for_ocr1_transmission(
+        &self,
+        registration: &FeedRegistration,
+        update: &Ocr1TransmissionStorageUpdate,
+        state: &dyn StateView,
+    ) -> Result<OracleStorageEffect, OracleStorageError> {
+        for adapter in &self.adapters {
+            if let Some(updates) =
+                adapter.state_updates_for_ocr1_transmission(registration, update, state)?
+            {
+                return Ok(OracleStorageEffect::StateUpdates {
+                    adapter: adapter.name(),
+                    updates,
+                });
+            }
+        }
+
+        Ok(OracleStorageEffect::FallbackPurge)
+    }
+
     /// Return true when any adapter wants OCR2 `NewTransmission` for this feed.
     pub fn prefers_ocr2_new_transmission(&self, registration: &FeedRegistration) -> bool {
         self.adapters
             .iter()
             .any(|adapter| adapter.prefers_ocr2_new_transmission(registration))
+    }
+
+    /// Return true when any adapter wants OCR1 `NewTransmission` for this feed.
+    pub fn prefers_ocr1_new_transmission(&self, registration: &FeedRegistration) -> bool {
+        self.adapters
+            .iter()
+            .any(|adapter| adapter.prefers_ocr1_new_transmission(registration))
     }
 }
 
@@ -418,6 +628,14 @@ fn mapping_slot(key: U256, base_slot: U256) -> U256 {
 }
 
 fn encode_int192(value: I256) -> Result<U256, OracleStorageError> {
+    encode_int192_with_adapter(value, ChainlinkOcr2StorageAdapter::NAME, "OCR2")
+}
+
+fn encode_int192_with_adapter(
+    value: I256,
+    adapter: &'static str,
+    family: &'static str,
+) -> Result<U256, OracleStorageError> {
     let raw = value.into_raw();
     let encoded = raw & uint_mask(INT192_BITS);
     let sign_bit_set = (encoded & (U256::from(1_u8) << (INT192_BITS - 1))) != U256::ZERO;
@@ -430,8 +648,8 @@ fn encode_int192(value: I256) -> Result<U256, OracleStorageError> {
 
     if high != expected_high {
         return Err(OracleStorageError::adapter(
-            ChainlinkOcr2StorageAdapter::NAME,
-            format!("answer {value} does not fit OCR2 int192"),
+            adapter,
+            format!("answer {value} does not fit {family} int192"),
         ));
     }
 

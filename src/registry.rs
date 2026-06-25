@@ -237,7 +237,10 @@ impl OracleRegistry {
 fn is_cacheable_layout(layout: AggregatorLayout) -> bool {
     matches!(
         layout,
-        AggregatorLayout::ChainlinkOcr2V1 | AggregatorLayout::ChainlinkOcr1V4
+        AggregatorLayout::ChainlinkOcr2V1
+            | AggregatorLayout::ChainlinkOcr1V2
+            | AggregatorLayout::ChainlinkOcr1V3
+            | AggregatorLayout::ChainlinkOcr1V4
     )
 }
 

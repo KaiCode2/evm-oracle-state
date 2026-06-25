@@ -13,12 +13,14 @@ The central guarantee is:
 `AnswerUpdated` logs update typed state immediately. By default, the reactive
 handler invalidates cached proxy and aggregator storage as a conservative
 fallback. For detected OCR2 feeds, the handler listens to `NewTransmission`
-instead and can emit exact cache state updates for the OCR2 aggregator. The crate
-detects supported aggregator layouts from `typeAndVersion()` and cached runtime
-code-hash evidence. It can also serve registered oracle view calls from typed state through
-`OracleReadOverlay`, so a simulation can observe the event price before a
-follow-up RPC read completes. Startup, periodic repair, aggregator changes, and
-post-reorg safety still use
+instead and can emit exact cache state updates for the OCR2 aggregator. For
+detected OCR1 feeds, the handler listens to the OCR1 `NewTransmission` event and
+writes the common `AccessControlledOffchainAggregator` 2.x/3.x/4.x layout. The
+crate detects supported aggregator layouts from `typeAndVersion()` and cached
+runtime code-hash evidence. It can also serve registered oracle view calls from
+typed state through `OracleReadOverlay`, so a simulation can observe the event
+price before a follow-up RPC read completes. Startup, periodic repair,
+aggregator changes, and post-reorg safety still use
 `latestRoundData()` through the proxy as the source of truth.
 
 ## MVP Surface
@@ -28,7 +30,8 @@ post-reorg safety still use
   best-effort `aggregator()` metadata at registration.
 - Look up typed snapshots by proxy address with freshness classification.
 - Decode `AnswerUpdated(int256,uint256,uint256)`,
-  `NewRound(uint256,address,uint256)`, and OCR2 `NewTransmission` logs.
+  `NewRound(uint256,address,uint256)`, OCR1 `NewTransmission`, and OCR2
+  `NewTransmission` logs.
 - Build `OracleReactiveHandler` log interests for current aggregators.
 - Emit `PurgeScope::AllStorage` invalidations for both proxy and aggregator on
   `AnswerUpdated`.
@@ -50,6 +53,8 @@ post-reorg safety still use
   evidence.
 - Use the built-in OCR2 adapter for direct cache writes against detected
   `AccessControlledOCR2Aggregator 1.0.0`-layout aggregators.
+- Use the built-in OCR1 adapter for direct cache writes against detected
+  `AccessControlledOffchainAggregator` 2.x, 3.x, and 4.x layout aggregators.
 - Reconcile event prices through `OracleReconciler`, emitting
   `OraclePriceConfirmed`, `OraclePriceCorrected`, `OraclePriceStale`, and
   `OracleAggregatorChanged` hook events.
@@ -64,7 +69,7 @@ post-reorg safety still use
 ## Event to Simulation Flow
 
 ```text
-AnswerUpdated or OCR2 NewTransmission log
+AnswerUpdated, OCR1 NewTransmission, or OCR2 NewTransmission log
   -> OracleReactiveHandler decodes the event
   -> OraclePriceUpdate hook is emitted immediately
   -> OracleTracker stores an EventPending snapshot
@@ -80,10 +85,10 @@ The cache policy is intentionally conservative:
 - Raw EVM storage is purged/refetched unless a detected layout adapter supports
   the feed.
 
-## Direct OCR2 Storage Sync
+## Direct Chainlink Storage Sync
 
-For detected Chainlink OCR2 aggregators, callers get event-derived cache writes
-from the default runtime/handler:
+For detected Chainlink OCR1 and OCR2 aggregators, callers get event-derived cache
+writes from the default runtime/handler:
 
 ```rust
 let mut oracle = OracleRuntime::builder(provider)
@@ -92,15 +97,23 @@ let mut oracle = OracleRuntime::builder(provider)
     .await?;
 ```
 
-The adapter writes the OCR2 `s_hotVars.latestEpochAndRound` and
+The OCR2 adapter writes the `s_hotVars.latestEpochAndRound` and
 `s_hotVars.latestAggregatorRoundId` packed fields plus the
 `s_transmissions[roundId]` mapping entry. For supported OCR2 feeds, the handler
-subscribes to `NewTransmission` instead of `AnswerUpdated`, so it can write the
-median answer, `startedAt` from `observationsTimestamp`, `updatedAt` from the
-block timestamp, and the latest epoch/round from the event. It only claims an
-event when registration or reconciliation has detected a supported layout and the
-packed hot-vars slot is already hot in `evm-fork-cache`; otherwise the existing
-purge/refetch fallback remains active.
+subscribes to OCR2 `NewTransmission` instead of `AnswerUpdated`, so it can write
+the median answer, `startedAt` from `observationsTimestamp`, `updatedAt` from the
+block timestamp, and the latest epoch/round from the event.
+
+The OCR1 adapter targets the common `AccessControlledOffchainAggregator`
+2.x/3.x/4.x layout. It writes `s_hotVars.latestEpochAndRound`,
+`s_hotVars.latestAggregatorRoundId`, and `s_transmissions[roundId]`. OCR1
+`NewTransmission` does not carry a separate observations timestamp, so
+`startedAt` and `updatedAt` both use the block timestamp, matching OCR1
+`latestRoundData()` behavior.
+
+Adapters only claim events when registration or reconciliation has detected a
+supported layout and the packed hot-vars slot is already hot in
+`evm-fork-cache`; otherwise the existing purge/refetch fallback remains active.
 
 ## Ergonomic Runtime
 
@@ -128,8 +141,8 @@ let price = oracle.price("eth-usd")?;
 
 - No durable database or indexer.
 - No Chainlink Feed Registry integration.
-- Direct storage writes are limited to detected OCR2 layouts; unsupported or
-  unknown layouts fall back to purge/refetch.
+- Direct storage writes are limited to detected OCR1/OCR2 layouts; unsupported
+  or unknown layouts fall back to purge/refetch.
 - No in-cache generic call interceptor in the pinned `evm-fork-cache` revision;
   use `OracleReadOverlay` as the simulation read adapter.
 - No trading, liquidation, or transaction submission behavior.

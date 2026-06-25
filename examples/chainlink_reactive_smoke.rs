@@ -23,8 +23,8 @@ use evm_fork_cache::{
 };
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, AggregatorLayout, ChainlinkFeedProvider, FeedConfig, FeedStatus,
-    OCR2_NEW_TRANSMISSION_TOPIC, OracleError, OracleReactiveHandler, OracleRegistry, OracleTracker,
-    ProviderFuture, RoundData, SnapshotSource, StalenessPolicy,
+    OCR1_NEW_TRANSMISSION_TOPIC, OCR2_NEW_TRANSMISSION_TOPIC, OracleError, OracleReactiveHandler,
+    OracleRegistry, OracleTracker, ProviderFuture, RoundData, SnapshotSource, StalenessPolicy,
 };
 
 alloy_sol_types::sol! {
@@ -143,6 +143,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             evidence.layout == AggregatorLayout::ChainlinkOcr2V1
                         }) {
                         OCR2_NEW_TRANSMISSION_TOPIC
+                    } else if registration
+                        .aggregator_layout
+                        .as_ref()
+                        .is_some_and(|evidence| evidence.is_chainlink_ocr1())
+                    {
+                        OCR1_NEW_TRANSMISSION_TOPIC
                     } else {
                         ANSWER_UPDATED_TOPIC
                     };
@@ -206,7 +212,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     } else {
         println!(
-            "historical_control no AnswerUpdated logs found in last {historical_lookback} blocks"
+            "historical_control no oracle update logs found in last {historical_lookback} blocks"
         );
     }
 
@@ -273,7 +279,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     if live_events == 0 {
         println!(
-            "reactive_smoke_note no live AnswerUpdated logs arrived during the timed window; historical control still exercised runtime/cache path"
+            "reactive_smoke_note no live oracle update logs arrived during the timed window; historical control still exercised runtime/cache path"
         );
     }
 
