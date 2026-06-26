@@ -149,16 +149,43 @@ let price = oracle.price("eth-usd")?;
 - Aggregator routing is best effort and should be rebuilt after reconciliation
   reports aggregator changes.
 
-## Example
+## Demos
 
-The example is network-gated:
+Start with the deterministic demos; they do not require an RPC URL and are safe
+to run in CI or during PR review.
+
+```sh
+cargo run --example local_oracle_lifecycle
+cargo run --example chainlink_storage_sync_demo
+```
+
+`local_oracle_lifecycle` walks through the core runtime flow:
+
+```text
+mock proxy read
+  -> ChainlinkFeed builder registration
+  -> synthetic AnswerUpdated log
+  -> immediate OraclePriceUpdate hook
+  -> EventPending typed state
+  -> OracleReadOverlay latestRoundData()
+  -> proxy reconciliation
+  -> OraclePriceConfirmed hook
+```
+
+`chainlink_storage_sync_demo` shows the direct state-write policy for detected
+Chainlink OCR1 and OCR2 aggregators. It prints the exact hot-vars and
+transmission writes when the layout is known and the hot-vars slot is already in
+cache, then shows the fallback purge/refetch path for a cold cache.
+
+The live examples are network-gated:
 
 ```sh
 cargo run --example chainlink_live_probe
 ETH_RPC_URL=https://example-rpc.invalid cargo run --example chainlink_live_probe
+ETH_RPC_URL=https://example-rpc.invalid SMOKE_DURATION_SECS=600 cargo run --example chainlink_reactive_smoke
 ```
 
-When `ETH_RPC_URL` is unset, it exits successfully without making network calls.
-Downstream live integrations should provide a `ChainlinkFeedProvider` backed by
-their preferred RPC, multicall, or cache layer and then register feeds with
-`OracleRegistry`.
+When `ETH_RPC_URL` is unset, live examples exit successfully without making
+network calls. Downstream live integrations should provide a
+`ChainlinkFeedProvider` backed by their preferred RPC, multicall, or cache layer
+and then register feeds with `OracleRuntime` or `OracleRegistry`.
