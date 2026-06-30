@@ -19,12 +19,14 @@ documentation = "https://docs.rs/evm-oracle-state"
 default = ["chainlink", "reactive"]
 chainlink = []
 reactive = []
+aave = []
 live-tests = ["alloy-provider/ws"]
 
 [dependencies]
-# INTERIM: match evm-amm-state while the reactive runtime is not available from
-# the local sibling checkout or crates.io release.
-evm-fork-cache = { git = "ssh://git@github.com/KaiCode2/evm-fork-cache.git", rev = "903af3df887bf5718693d4bacf770552681e5273", version = "0.1" }
+# INTERIM: use the sibling checkout while evm-fork-cache's live AlloySubscriber
+# work and cold-start updates are not available from one published/git-pinned
+# release.
+evm-fork-cache = { path = "../evm-fork-cache", version = "0.1" }
 
 alloy-eips = "1.0.38"
 alloy-network = "1.0.38"

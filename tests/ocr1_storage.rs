@@ -15,7 +15,7 @@ use evm_fork_cache::{
 };
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, AggregatorLayoutEvidence, ChainlinkOcr1StorageAdapter, FeedId,
-    FeedMetadata, FeedRegistration, OCR1_NEW_TRANSMISSION_TOPIC, OraclePriceUpdate,
+    FeedMetadata, FeedRegistration, FeedSource, OCR1_NEW_TRANSMISSION_TOPIC, OraclePriceUpdate,
     OracleReactiveHandler, OracleSignalKind, OracleStorageEffect, OracleStorageSync,
     StalenessPolicy,
 };
@@ -70,6 +70,7 @@ fn registration(proxy: Address, aggregator: Address, version: &str) -> FeedRegis
             aggregator, version, None,
         )),
         metadata: metadata(),
+        source: FeedSource::Chainlink,
     }
 }
 

@@ -4,8 +4,8 @@ use alloy_primitives::{Address, I256, U256};
 use evm_fork_cache::{StateUpdate, StateView};
 use evm_oracle_state::{
     AggregatorLayoutEvidence, ChainlinkOcr1StorageAdapter, ChainlinkOcr2StorageAdapter, FeedId,
-    FeedMetadata, FeedRegistration, Ocr1TransmissionStorageUpdate, Ocr2TransmissionStorageUpdate,
-    OracleStorageEffect, OracleStorageSync, StalenessPolicy,
+    FeedMetadata, FeedRegistration, FeedSource, Ocr1TransmissionStorageUpdate,
+    Ocr2TransmissionStorageUpdate, OracleStorageEffect, OracleStorageSync, StalenessPolicy,
 };
 
 const PROXY: Address = Address::repeat_byte(0x10);
@@ -106,6 +106,7 @@ fn registration(aggregator: Address, type_and_version: &str, id: &str) -> FeedRe
             description: "ETH / USD".to_string(),
             version: U256::from(4_u64),
         },
+        source: FeedSource::Chainlink,
     }
 }
 

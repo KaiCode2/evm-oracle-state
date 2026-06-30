@@ -4,9 +4,13 @@
 //! `latestRoundData()` are the authoritative state and should be used for
 //! startup, periodic reconciliation, and repair after gaps or reorgs.
 
+#[cfg(feature = "aave")]
+mod aave;
+mod cache_reader;
 mod config;
 mod error;
 mod events;
+mod feed;
 mod layout;
 mod overlay;
 mod price;
@@ -18,7 +22,14 @@ mod signal;
 mod state;
 mod storage;
 mod tracker;
+mod types;
 
+#[cfg(feature = "aave")]
+pub use aave::{AaveAsset, AaveV3OracleAdapter};
+pub use cache_reader::{
+    EvmCacheChainlinkReader, OracleAdapter, OracleAdapterBuildReport, OracleAdapterBuilder,
+    OracleAdapterFeedSkip, OracleAdapterSkipReason,
+};
 pub use config::{FeedConfig, StalenessPolicy};
 pub use error::{ChainlinkEventDecodeError, OracleError, OracleSignalDecodeError};
 pub use events::{
@@ -26,15 +37,16 @@ pub use events::{
     OCR2_NEW_TRANSMISSION_TOPIC, Ocr1NewTransmission, Ocr2NewTransmission, decode_answer_updated,
     decode_new_round, decode_ocr1_new_transmission, decode_ocr2_new_transmission,
 };
+pub use feed::{Feed, FeedAccess, FeedBuilder, FeedBuilderState, FeedReady};
 pub use layout::{
     AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence,
     classify_type_and_version,
 };
 pub use overlay::OracleReadOverlay;
-pub use price::OraclePrice;
+pub use price::{CheckedPrice, OraclePrice, PricePolicy};
 pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
 pub use reactive::OracleReactiveHandler;
-pub use registry::{AggregatorChange, FeedId, FeedRegistration, OracleRegistry};
+pub use registry::{AggregatorChange, FeedId, FeedRegistration, FeedSource, OracleRegistry};
 pub use runtime::{ChainlinkFeed, OracleRuntime, OracleRuntimeBuilder};
 pub use signal::{
     ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE, OracleSignal, OracleSignalKind,
@@ -52,3 +64,4 @@ pub use tracker::{
     OraclePriceStale, OraclePriceUpdate, OracleReconciler, OracleReconciliationRequest,
     OracleReconciliationResult, OracleTracker, OracleUpdate, ReconcileReport,
 };
+pub use types::{AssetId, Denomination, TokenAmount, ValuedAmount};

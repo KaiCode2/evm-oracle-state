@@ -1730,7 +1730,6 @@ dependencies = [
 [[package]]
 name = "evm-fork-cache"
 version = "0.1.0"
-source = "git+ssh://git@github.com/KaiCode2/evm-fork-cache.git?rev=903af3df887bf5718693d4bacf770552681e5273#903af3df887bf5718693d4bacf770552681e5273"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -1747,6 +1746,7 @@ dependencies = [
  "foundry-fork-db",
  "futures",
  "revm",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror",
@@ -3623,6 +3623,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
 dependencies = [
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

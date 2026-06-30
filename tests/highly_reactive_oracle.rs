@@ -16,8 +16,9 @@ use evm_fork_cache::reactive::{
 };
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, ChainlinkFeedProvider, FeedId, FeedMetadata, FeedRegistration,
-    OracleHookEvent, OraclePriceUpdate, OracleReactiveHandler, OracleReadOverlay, OracleReconciler,
-    OracleSnapshotStatus, OracleTracker, RoundData, SnapshotSource, StalenessPolicy,
+    FeedSource, OracleHookEvent, OraclePriceUpdate, OracleReactiveHandler, OracleReadOverlay,
+    OracleReconciler, OracleSnapshotStatus, OracleTracker, RoundData, SnapshotSource,
+    StalenessPolicy,
 };
 
 type ProviderFuture<'a, T> =
@@ -94,6 +95,7 @@ fn registration(proxy: Address, aggregator: Address) -> FeedRegistration {
         current_aggregator: Some(aggregator),
         aggregator_layout: None,
         metadata: metadata(),
+        source: FeedSource::Chainlink,
     }
 }
 

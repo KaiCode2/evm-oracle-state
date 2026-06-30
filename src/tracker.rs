@@ -419,9 +419,12 @@ impl OracleTracker {
 
         for mut registration in registrations {
             report.checked_feeds += 1;
-            let round = provider.latest_round_data(registration.proxy).await?;
+            let read_proxy = registration.source.read_proxy(registration.proxy);
+            let round = registration
+                .source
+                .normalize_round(provider.latest_round_data(read_proxy).await?);
             let new_aggregator = provider
-                .aggregator(registration.proxy)
+                .aggregator(read_proxy)
                 .await
                 .unwrap_or(registration.current_aggregator);
             let new_layout = self
@@ -631,6 +634,7 @@ impl OracleTracker {
             return Err(OracleError::FeedNotFound);
         };
 
+        let proxy_round = registration.source.normalize_round(proxy_round);
         let old_aggregator = registration.current_aggregator;
         let mut snapshot = snapshot_from_proxy_read(
             &registration,
@@ -751,12 +755,19 @@ impl OracleReconciler {
             return Ok(None);
         };
 
+        let Some(registration) = tracker
+            .registry
+            .registrations_map()
+            .get(&request.id)
+            .cloned()
+        else {
+            return Err(OracleError::FeedNotFound);
+        };
         let block_ref = request.block_ref();
-        let proxy_round = provider
-            .latest_round_data_at(request.proxy, block_ref)
-            .await?;
+        let read_proxy = registration.source.read_proxy(registration.proxy);
+        let proxy_round = provider.latest_round_data_at(read_proxy, block_ref).await?;
         let new_aggregator = provider
-            .aggregator_at(request.proxy, block_ref)
+            .aggregator_at(read_proxy, block_ref)
             .await
             .unwrap_or_else(|_| {
                 tracker

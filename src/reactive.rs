@@ -143,13 +143,14 @@ impl OracleReactiveHandler {
             }
             handled_any = true;
 
+            let normalized_answer = registration.source.normalize_answer(event.current);
             let update = OracleUpdate {
                 id: registration.id,
                 proxy: registration.proxy,
                 aggregator,
                 round: RoundData {
                     round_id: event.round_id,
-                    answer: event.current,
+                    answer: normalized_answer,
                     started_at: event.updated_at,
                     updated_at: event.updated_at,
                     answered_in_round: event.round_id,
@@ -157,7 +158,7 @@ impl OracleReactiveHandler {
                 block_number,
                 log_index,
             };
-            let price_update = OraclePriceUpdate {
+            let raw_storage_update = OraclePriceUpdate {
                 id: registration.id,
                 proxy: registration.proxy,
                 aggregator,
@@ -178,12 +179,14 @@ impl OracleReactiveHandler {
                     OracleSnapshotStatus::EventPending
                 },
             };
+            let mut price_update = raw_storage_update.clone();
+            price_update.raw_answer = normalized_answer;
             apply_storage_effect(
                 &mut effects,
                 &mut needs_aggregator_purge,
                 registration.proxy,
                 self.storage_sync
-                    .state_effect_for_answer(registration, &price_update, state)
+                    .state_effect_for_answer(registration, &raw_storage_update, state)
                     .map_err(|error| HandlerError::new(format!("{error}")))?,
             );
             let hook_tags = hook_tags(registration, aggregator);
@@ -267,7 +270,7 @@ impl OracleReactiveHandler {
                 label: registration.label.clone(),
                 base: registration.base.clone(),
                 quote: registration.quote.clone(),
-                raw_answer: event.answer,
+                raw_answer: registration.source.normalize_answer(event.answer),
                 decimals: registration.metadata.decimals,
                 event_round_id: event.aggregator_round_id,
                 started_at: event.observations_timestamp,
@@ -370,7 +373,7 @@ impl OracleReactiveHandler {
                 label: registration.label.clone(),
                 base: registration.base.clone(),
                 quote: registration.quote.clone(),
-                raw_answer: event.answer,
+                raw_answer: registration.source.normalize_answer(event.answer),
                 decimals: registration.metadata.decimals,
                 event_round_id: event.aggregator_round_id,
                 started_at: transmission_timestamp,

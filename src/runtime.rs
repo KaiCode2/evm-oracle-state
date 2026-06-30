@@ -3,9 +3,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use alloy_network::Network;
+use alloy_network::{Ethereum, Network};
 use alloy_primitives::Address;
-use evm_fork_cache::reactive::ReactiveBatchReport;
+use evm_fork_cache::{
+    cache::EvmCache,
+    reactive::{EventSubscriber, ReactiveBatchReport, ReactiveConfig, ReactiveRuntime},
+};
 
 use crate::{
     ChainlinkFeedProvider, FeedConfig, FeedId, OracleError, OracleHookEvent, OraclePrice,
@@ -238,6 +241,42 @@ impl<P> OracleRuntime<P> {
         )
     }
 
+    /// Build a reactive runtime with this oracle handler already installed.
+    pub fn reactive_runtime(&self) -> Result<ReactiveRuntime<Ethereum>, OracleError> {
+        let mut runtime = ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default());
+        runtime
+            .register_handler(Arc::new(self.reactive_handler()))
+            .map_err(runtime_error)?;
+        Ok(runtime)
+    }
+
+    /// Register this runtime's oracle interests with an event subscriber.
+    pub fn register_subscriber<S>(&self, subscriber: &mut S) -> Result<(), OracleError>
+    where
+        S: EventSubscriber<Ethereum>,
+    {
+        subscriber
+            .register_interests(&self.reactive_handler().interests())
+            .map_err(runtime_error)
+    }
+
+    /// Read one subscriber batch, apply it to the cache, and return typed oracle events.
+    pub async fn next_subscriber_events<S>(
+        &mut self,
+        cache: &mut EvmCache,
+        runtime: &mut ReactiveRuntime<Ethereum>,
+        subscriber: &mut S,
+    ) -> Result<Option<Vec<OracleHookEvent>>, OracleError>
+    where
+        S: EventSubscriber<Ethereum>,
+    {
+        let Some(batch) = subscriber.next_batch().await.map_err(runtime_error)? else {
+            return Ok(None);
+        };
+        let report = runtime.ingest_batch(cache, batch).map_err(runtime_error)?;
+        self.apply_batch_report(&report).map(Some)
+    }
+
     /// Build a read overlay over the current tracker state.
     pub fn read_overlay(&self) -> OracleReadOverlay<'_> {
         OracleReadOverlay::new(&self.tracker)
@@ -307,4 +346,20 @@ impl<P> OracleRuntime<P> {
             }
         }
     }
+}
+
+impl OracleRuntime<()> {
+    /// Build a runtime facade from a cache-native tracker.
+    pub fn from_tracker(tracker: OracleTracker) -> Self {
+        Self {
+            provider: (),
+            tracker,
+            storage_sync: OracleStorageSync::chainlink_defaults(),
+            callbacks: Vec::new(),
+        }
+    }
+}
+
+fn runtime_error(error: impl ToString) -> OracleError {
+    OracleError::Provider(error.to_string())
 }

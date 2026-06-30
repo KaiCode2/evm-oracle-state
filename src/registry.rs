@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, I256, U256};
 
 use crate::{
     AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence, ChainlinkFeedProvider,
@@ -30,6 +30,68 @@ impl std::fmt::Display for FeedId {
     }
 }
 
+/// Network source and transform for a registered feed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum FeedSource {
+    /// Plain Chainlink-compatible proxy with identity answer transform.
+    #[default]
+    Chainlink,
+    /// Aave `PriceCapAdapterStable` source backed by an underlying Chainlink proxy.
+    AavePriceCapStable {
+        /// User-facing Aave source adapter.
+        source: Address,
+        /// Underlying Chainlink proxy read for rounds and aggregator discovery.
+        underlying_proxy: Address,
+        /// Maximum answer exposed by the Aave adapter.
+        price_cap: I256,
+    },
+}
+
+impl FeedSource {
+    /// Construct an Aave capped stable source transform.
+    pub fn aave_price_cap_stable(
+        source: Address,
+        underlying_proxy: Address,
+        price_cap: I256,
+    ) -> Self {
+        Self::AavePriceCapStable {
+            source,
+            underlying_proxy,
+            price_cap,
+        }
+    }
+
+    /// Return true when this source is a plain identity Chainlink source.
+    pub fn is_identity(&self) -> bool {
+        matches!(self, Self::Chainlink)
+    }
+
+    /// Proxy that should be read for authoritative Chainlink round data.
+    pub fn read_proxy(&self, registration_proxy: Address) -> Address {
+        match self {
+            Self::Chainlink => registration_proxy,
+            Self::AavePriceCapStable {
+                underlying_proxy, ..
+            } => *underlying_proxy,
+        }
+    }
+
+    /// Apply the source transform to an event or read answer.
+    pub fn normalize_answer(&self, answer: I256) -> I256 {
+        match self {
+            Self::Chainlink => answer,
+            Self::AavePriceCapStable { price_cap, .. } if answer > *price_cap => *price_cap,
+            Self::AavePriceCapStable { .. } => answer,
+        }
+    }
+
+    /// Apply the source transform to round data.
+    pub fn normalize_round(&self, mut round: RoundData) -> RoundData {
+        round.answer = self.normalize_answer(round.answer);
+        round
+    }
+}
+
 /// Registered Chainlink-compatible proxy feed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeedRegistration {
@@ -51,6 +113,8 @@ pub struct FeedRegistration {
     pub aggregator_layout: Option<AggregatorLayoutEvidence>,
     /// Metadata loaded from the proxy.
     pub metadata: FeedMetadata,
+    /// Network source and transform used by this registration.
+    pub source: FeedSource,
 }
 
 /// Aggregator routing change found during reconciliation.
@@ -94,24 +158,61 @@ impl OracleRegistry {
         provider: &P,
         config: FeedConfig,
     ) -> Result<FeedId, OracleError> {
-        if self.ids_by_proxy.contains_key(&config.proxy) {
-            return Err(OracleError::DuplicateProxy(config.proxy));
-        }
-
-        let id = config
-            .id
-            .unwrap_or_else(|| derive_feed_id(config.label.as_deref(), config.proxy));
-        if self.registrations.contains_key(&id) {
-            return Err(OracleError::DuplicateFeedId(id.to_string()));
-        }
-
+        let id = self.prepare_feed_id(&config)?;
+        let source = FeedSource::Chainlink;
+        let read_proxy = source.read_proxy(config.proxy);
         let metadata = FeedMetadata {
-            decimals: provider.decimals(config.proxy).await?,
-            description: provider.description(config.proxy).await?,
-            version: provider.version(config.proxy).await?,
+            decimals: provider.decimals(read_proxy).await?,
+            description: provider.description(read_proxy).await?,
+            version: provider.version(read_proxy).await?,
         };
-        let round = provider.latest_round_data(config.proxy).await?;
-        let current_aggregator = provider.aggregator(config.proxy).await.unwrap_or(None);
+        let round = source.normalize_round(provider.latest_round_data(read_proxy).await?);
+        let current_aggregator = provider.aggregator(read_proxy).await.unwrap_or(None);
+        self.insert_prepared_feed(
+            provider,
+            id,
+            config,
+            source,
+            metadata,
+            round,
+            current_aggregator,
+        )
+        .await
+    }
+
+    #[cfg(feature = "aave")]
+    pub(crate) async fn register_discovered_feed<P: ChainlinkFeedProvider>(
+        &mut self,
+        provider: &P,
+        config: FeedConfig,
+        source: FeedSource,
+        metadata: FeedMetadata,
+        round: RoundData,
+        current_aggregator: Option<Address>,
+    ) -> Result<FeedId, OracleError> {
+        let id = self.prepare_feed_id(&config)?;
+        self.insert_prepared_feed(
+            provider,
+            id,
+            config,
+            source,
+            metadata,
+            round,
+            current_aggregator,
+        )
+        .await
+    }
+
+    async fn insert_prepared_feed<P: ChainlinkFeedProvider>(
+        &mut self,
+        provider: &P,
+        id: FeedId,
+        config: FeedConfig,
+        source: FeedSource,
+        metadata: FeedMetadata,
+        round: RoundData,
+        current_aggregator: Option<Address>,
+    ) -> Result<FeedId, OracleError> {
         let aggregator_layout = self
             .detect_aggregator_layout(provider, current_aggregator, None)
             .await;
@@ -126,6 +227,7 @@ impl OracleRegistry {
             current_aggregator,
             aggregator_layout,
             metadata: metadata.clone(),
+            source,
         };
         let snapshot = OracleSnapshot::proxy_read(
             id,
@@ -140,6 +242,20 @@ impl OracleRegistry {
         self.ids_by_proxy.insert(registration.proxy, id);
         self.snapshots_by_proxy.insert(registration.proxy, snapshot);
         self.registrations.insert(id, registration);
+        Ok(id)
+    }
+
+    fn prepare_feed_id(&self, config: &FeedConfig) -> Result<FeedId, OracleError> {
+        if self.ids_by_proxy.contains_key(&config.proxy) {
+            return Err(OracleError::DuplicateProxy(config.proxy));
+        }
+
+        let id = config
+            .id
+            .unwrap_or_else(|| derive_feed_id(config.label.as_deref(), config.proxy));
+        if self.registrations.contains_key(&id) {
+            return Err(OracleError::DuplicateFeedId(id.to_string()));
+        }
         Ok(id)
     }
 

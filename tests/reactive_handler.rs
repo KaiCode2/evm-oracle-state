@@ -14,7 +14,7 @@ use evm_fork_cache::reactive::{
     RouteKeySpec, StateEffectQuality,
 };
 use evm_oracle_state::{
-    ANSWER_UPDATED_TOPIC, FeedId, FeedMetadata, FeedRegistration, FeedStatus,
+    ANSWER_UPDATED_TOPIC, FeedId, FeedMetadata, FeedRegistration, FeedSource, FeedStatus,
     OracleReactiveHandler, OracleTracker, RoundData, SnapshotSource, StalenessPolicy,
 };
 
@@ -106,6 +106,7 @@ fn registration(proxy: Address, aggregator: Address) -> FeedRegistration {
             description: "ETH / USD".to_string(),
             version: U256::from(4_u64),
         },
+        source: FeedSource::Chainlink,
     }
 }
 

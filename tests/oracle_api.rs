@@ -12,10 +12,10 @@ use evm_fork_cache::{
 };
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, ChainlinkFeed, ChainlinkFeedProvider, FeedId, FeedMetadata,
-    FeedRegistration, ORACLE_SIGNAL_NAMESPACE, OracleError, OracleHookEvent, OraclePriceUpdate,
-    OracleReactiveHandler, OracleRuntime, OracleSignal, OracleSignalKind, OracleSnapshotStatus,
-    OracleStorageAdapter, OracleStorageError, OracleStorageSync, OracleTracker, RoundData,
-    StalenessPolicy,
+    FeedRegistration, FeedSource, ORACLE_SIGNAL_NAMESPACE, OracleError, OracleHookEvent,
+    OraclePriceUpdate, OracleReactiveHandler, OracleRuntime, OracleSignal, OracleSignalKind,
+    OracleSnapshotStatus, OracleStorageAdapter, OracleStorageError, OracleStorageSync,
+    OracleTracker, RoundData, StalenessPolicy,
 };
 
 type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OracleError>> + Send + 'a>>;
@@ -106,6 +106,7 @@ fn registration(proxy: Address, aggregator: Address) -> FeedRegistration {
         current_aggregator: Some(aggregator),
         aggregator_layout: None,
         metadata: metadata(),
+        source: FeedSource::Chainlink,
     }
 }
 

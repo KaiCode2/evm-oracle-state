@@ -25,7 +25,8 @@ aggregator changes, and post-reorg safety still use
 
 ## MVP Surface
 
-- Register Chainlink-compatible proxy feeds with a `ChainlinkFeedProvider`.
+- Register Chainlink-compatible proxy feeds with typed `Feed::proxy(...)`
+  metadata.
 - Read `decimals()`, `description()`, `version()`, `latestRoundData()`, and
   best-effort `aggregator()` metadata at registration.
 - Look up typed snapshots by proxy address with freshness classification.
@@ -42,8 +43,15 @@ aggregator changes, and post-reorg safety still use
   `EventPending`, `Confirmed`, `Corrected`, `Stale`, `Invalid`, and `Unknown`.
 - Read typed prices with `OracleTracker::price`, `price_by_proxy`, and
   `latest_round` without ABI encoding.
+- Promote raw oracle prices with `PricePolicy` before liquidation or market
+  valuation decisions.
+- Value `TokenAmount`s with checked arithmetic through `CheckedPrice::value_of`.
 - Build a higher-level `OracleRuntime` with `ChainlinkFeed` registrations and
-  optional typed event callbacks.
+  optional typed event callbacks, or use the cache-native
+  `OracleAdapter::builder().feed(Feed::proxy(...))` groundwork over `EvmCache`.
+- With the `aave` feature, use `AaveV3OracleAdapter` and `AaveAsset` to
+  discover Aave V3 oracle sources from `getSourceOfAsset`, including
+  `PriceCapAdapterStable` sources backed by underlying Chainlink feeds.
 - Queue event-specific, block-identified proxy reconciliation requests after
   committed price updates.
 - Serve simulation-facing `latestRoundData()`, `decimals()`, `description()`,
@@ -118,6 +126,9 @@ supported layout and the packed hot-vars slot is already hot in
 ## Ergonomic Runtime
 
 ```rust
+use alloy_primitives::U256;
+use evm_oracle_state::{AssetId, Denomination, PricePolicy, TokenAmount};
+
 let mut oracle = OracleRuntime::builder(provider)
     .feed(
         ChainlinkFeed::new(eth_usd_proxy)
@@ -134,16 +145,64 @@ let mut oracle = OracleRuntime::builder(provider)
     .await?;
 
 let handler = oracle.reactive_handler();
-let price = oracle.price("eth-usd")?;
+let price = oracle
+    .price("eth-usd")?
+    .require(PricePolicy::liquidation().quote(Denomination::Usd))?;
+let two_eth = TokenAmount::new(
+    AssetId::symbol("ETH"),
+    U256::from(2_000_000_000_000_000_000_u128),
+    18,
+);
+let usd_value = price.value_of(two_eth, 18)?;
+```
+
+When an `EvmCache` is already present, the cache-native adapter provides the
+preferred lower-level registration path:
+
+```rust
+use evm_oracle_state::{AssetId, Denomination, Feed, OracleAdapter};
+
+let tracker = OracleAdapter::builder()
+    .feed(
+        Feed::proxy(eth_usd_proxy)
+            .id("eth-usd")
+            .label("ETH/USD")
+            .base(AssetId::symbol("ETH"))
+            .quote(Denomination::Usd)
+            .max_age_secs(3600),
+    )
+    .build(&mut cache)
+    .await?;
+```
+
+With `--features aave`, Aave assets can be registered declaratively:
+
+```rust
+use evm_oracle_state::{AaveAsset, AaveV3OracleAdapter, AssetId, Denomination};
+
+let tracker = AaveV3OracleAdapter::new(aave_oracle)
+    .asset(
+        AaveAsset::new(usdt)
+            .id("aave-v3-usdt")
+            .label("Aave V3 USDT")
+            .base(AssetId::symbol("USDT"))
+            .quote(Denomination::Usd)
+            .max_age_secs(24 * 60 * 60),
+    )
+    .build(&mut cache)
+    .await?;
 ```
 
 ## Limitations
 
 - No durable database or indexer.
 - No Chainlink Feed Registry integration.
+- Aave source discovery currently supports plain Chainlink-compatible sources
+  and `PriceCapAdapterStable`; ratio, PT, fixed-price, and other adapter
+  variants are reported as skipped sources.
 - Direct storage writes are limited to detected OCR1/OCR2 layouts; unsupported
   or unknown layouts fall back to purge/refetch.
-- No in-cache generic call interceptor in the pinned `evm-fork-cache` revision;
+- No in-cache generic call interceptor in the current `evm-fork-cache` surface;
   use `OracleReadOverlay` as the simulation read adapter.
 - No trading, liquidation, or transaction submission behavior.
 - Aggregator routing is best effort and should be rebuilt after reconciliation
@@ -183,9 +242,24 @@ The live examples are network-gated:
 cargo run --example chainlink_live_probe
 ETH_RPC_URL=https://example-rpc.invalid cargo run --example chainlink_live_probe
 ETH_RPC_URL=https://example-rpc.invalid SMOKE_DURATION_SECS=600 cargo run --example chainlink_reactive_smoke
+ETH_RPC_URL=https://example-http-rpc.invalid ETH_WS_RPC_URL=wss://example-ws-rpc.invalid AAVE_DEMO_DURATION_SECS=600 cargo run --features aave --example aave_v3_health_factor -- 0xcc144c2e9fc40f92257b2cd7cc43e1f82666f09a
 ```
 
 When `ETH_RPC_URL` is unset, live examples exit successfully without making
-network calls. Downstream live integrations should provide a
-`ChainlinkFeedProvider` backed by their preferred RPC, multicall, or cache layer
-and then register feeds with `OracleRuntime` or `OracleRegistry`.
+network calls. Downstream live integrations should prefer the cache-backed
+adapter path when an `EvmCache` is already present. `ChainlinkFeedProvider`
+remains available for tests, custom RPC/multicall readers, and advanced
+integration seams.
+
+`aave_v3_health_factor` is a cache-backed Ethereum Aave V3 lending-market demo.
+It loads the user's active reserves through `EvmCache`, registers
+Aave oracle sources with the cache-native reader, prints the reactive oracle log
+interests, computes collateral/debt/health-factor math locally, and compares the
+result with Aave `getUserAccountData` read through the same cache. Build it with
+`--features aave` to discover Aave sources from asset addresses, including
+`PriceCapAdapterStable` sources backed by underlying Chainlink feeds. It then
+registers the oracle interests with
+`evm-fork-cache`'s `AlloySubscriber`; every `OraclePriceUpdate` hook prints the
+new oracle answer and recomputes the health factor from the event-mutated cache.
+It also prints the DeBank CLI command used for an off-chain portfolio sanity
+check.
