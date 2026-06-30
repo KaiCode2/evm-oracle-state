@@ -47,11 +47,14 @@ impl OracleReactiveHandler {
             if !registration.source.uses_builtin_chainlink_handler() {
                 continue;
             }
-            if let Some(aggregator) = registration.current_aggregator {
+            for aggregator in registration
+                .source
+                .event_aggregators(registration.current_aggregator)
+            {
                 registrations_by_aggregator
                     .entry(aggregator)
                     .or_default()
-                    .push(registration);
+                    .push(registration.clone());
             }
         }
         Self {
@@ -70,20 +73,31 @@ impl OracleReactiveHandler {
         let mut interests = Vec::new();
         for (aggregator, registrations) in &self.registrations_by_aggregator {
             let wants_ocr2 = registrations.iter().any(|registration| {
-                self.storage_sync
-                    .prefers_ocr2_new_transmission(registration)
+                !registration
+                    .source
+                    .wants_answer_updated_from(registration.current_aggregator, *aggregator)
+                    && self
+                        .storage_sync
+                        .prefers_ocr2_new_transmission(registration)
             });
             let wants_ocr1 = registrations.iter().any(|registration| {
-                self.storage_sync
-                    .prefers_ocr1_new_transmission(registration)
-            });
-            let wants_answer = registrations.iter().any(|registration| {
-                !self
-                    .storage_sync
-                    .prefers_ocr2_new_transmission(registration)
-                    && !self
+                !registration
+                    .source
+                    .wants_answer_updated_from(registration.current_aggregator, *aggregator)
+                    && self
                         .storage_sync
                         .prefers_ocr1_new_transmission(registration)
+            });
+            let wants_answer = registrations.iter().any(|registration| {
+                registration
+                    .source
+                    .wants_answer_updated_from(registration.current_aggregator, *aggregator)
+                    || (!self
+                        .storage_sync
+                        .prefers_ocr2_new_transmission(registration)
+                        && !self
+                            .storage_sync
+                            .prefers_ocr1_new_transmission(registration))
             });
 
             if wants_answer {
@@ -135,18 +149,24 @@ impl OracleReactiveHandler {
         let mut handled_any = false;
 
         for registration in registrations {
-            if self
-                .storage_sync
-                .prefers_ocr2_new_transmission(registration)
-                || self
+            let wants_answer = registration
+                .source
+                .wants_answer_updated_from(registration.current_aggregator, aggregator);
+            if !wants_answer
+                && (self
                     .storage_sync
-                    .prefers_ocr1_new_transmission(registration)
+                    .prefers_ocr2_new_transmission(registration)
+                    || self
+                        .storage_sync
+                        .prefers_ocr1_new_transmission(registration))
             {
                 continue;
             }
             handled_any = true;
 
-            let normalized_answer = registration.source.normalize_answer(event.current);
+            let normalized_answer = registration
+                .source
+                .normalize_answer_from_event(Some(aggregator), event.current);
             let update = OracleUpdate {
                 id: registration.id,
                 proxy: registration.proxy,
@@ -184,14 +204,26 @@ impl OracleReactiveHandler {
             };
             let mut price_update = raw_storage_update.clone();
             price_update.raw_answer = normalized_answer;
-            apply_storage_effect(
-                &mut effects,
-                &mut needs_aggregator_purge,
-                registration.proxy,
-                self.storage_sync
-                    .state_effect_for_answer(registration, &raw_storage_update, state)
-                    .map_err(|error| HandlerError::new(format!("{error}")))?,
-            );
+            if registration
+                .source
+                .supports_direct_chainlink_storage_effects()
+            {
+                apply_storage_effect(
+                    &mut effects,
+                    &mut needs_aggregator_purge,
+                    registration.proxy,
+                    self.storage_sync
+                        .state_effect_for_answer(registration, &raw_storage_update, state)
+                        .map_err(|error| HandlerError::new(format!("{error}")))?,
+                );
+            } else {
+                apply_storage_effect(
+                    &mut effects,
+                    &mut needs_aggregator_purge,
+                    registration.proxy,
+                    OracleStorageEffect::FallbackPurge,
+                );
+            }
             let hook_tags = hook_tags(registration, aggregator);
             tags.extend(hook_tags.clone());
             if !log.removed {

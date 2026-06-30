@@ -46,6 +46,51 @@ pub enum FeedSource {
         /// Maximum answer exposed by the Aave adapter.
         price_cap: I256,
     },
+    /// Aave ratio-cap/CAPO source backed by a base-to-USD Chainlink proxy.
+    AaveRatioCap {
+        /// User-facing Aave source adapter.
+        source: Address,
+        /// Underlying base-to-USD Chainlink proxy.
+        base_to_usd_proxy: Address,
+        /// Ratio provider used by the Aave source.
+        ratio_provider: Address,
+        /// Current source ratio.
+        current_ratio: I256,
+        /// Maximum ratio exposed by the Aave source.
+        max_ratio: I256,
+        /// Decimals used by the ratio values.
+        ratio_decimals: u8,
+    },
+    /// Aave Chainlink synchronicity adapter composing asset-to-peg and peg-to-base feeds.
+    AaveSynchronicityPegToBase {
+        /// User-facing Aave source adapter.
+        source: Address,
+        /// Asset-to-peg Chainlink proxy.
+        asset_to_peg_proxy: Address,
+        /// Asset-to-peg current aggregator.
+        asset_to_peg_aggregator: Address,
+        /// Seeded asset-to-peg answer used when the other dependency updates.
+        asset_to_peg_answer: I256,
+        /// Asset-to-peg decimals.
+        asset_to_peg_decimals: u8,
+        /// Peg-to-base Chainlink proxy.
+        peg_to_base_proxy: Address,
+        /// Peg-to-base current aggregator.
+        peg_to_base_aggregator: Address,
+        /// Seeded peg-to-base answer used when the other dependency updates.
+        peg_to_base_answer: I256,
+        /// Peg-to-base decimals.
+        peg_to_base_decimals: u8,
+        /// Decimals for the user-facing composed answer.
+        output_decimals: u8,
+    },
+    /// Aave fixed-price source with no Chainlink dependency.
+    AaveFixedPrice {
+        /// User-facing Aave source adapter.
+        source: Address,
+        /// Fixed user-facing answer.
+        price: I256,
+    },
     /// Adapter-owned oracle source.
     Custom(OracleSourceDescriptor),
 }
@@ -64,6 +109,58 @@ impl FeedSource {
         }
     }
 
+    /// Construct an Aave ratio-cap/CAPO source transform.
+    pub fn aave_ratio_cap(
+        source: Address,
+        base_to_usd_proxy: Address,
+        ratio_provider: Address,
+        current_ratio: I256,
+        max_ratio: I256,
+        ratio_decimals: u8,
+    ) -> Self {
+        Self::AaveRatioCap {
+            source,
+            base_to_usd_proxy,
+            ratio_provider,
+            current_ratio,
+            max_ratio,
+            ratio_decimals,
+        }
+    }
+
+    /// Construct an Aave peg-to-base synchronicity source transform.
+    #[allow(clippy::too_many_arguments)]
+    pub fn aave_synchronicity_peg_to_base(
+        source: Address,
+        asset_to_peg_proxy: Address,
+        asset_to_peg_aggregator: Address,
+        asset_to_peg_answer: I256,
+        asset_to_peg_decimals: u8,
+        peg_to_base_proxy: Address,
+        peg_to_base_aggregator: Address,
+        peg_to_base_answer: I256,
+        peg_to_base_decimals: u8,
+        output_decimals: u8,
+    ) -> Self {
+        Self::AaveSynchronicityPegToBase {
+            source,
+            asset_to_peg_proxy,
+            asset_to_peg_aggregator,
+            asset_to_peg_answer,
+            asset_to_peg_decimals,
+            peg_to_base_proxy,
+            peg_to_base_aggregator,
+            peg_to_base_answer,
+            peg_to_base_decimals,
+            output_decimals,
+        }
+    }
+
+    /// Construct an Aave fixed-price source.
+    pub fn aave_fixed_price(source: Address, price: I256) -> Self {
+        Self::AaveFixedPrice { source, price }
+    }
+
     /// Construct an adapter-owned custom source.
     pub fn custom(descriptor: OracleSourceDescriptor) -> Self {
         Self::Custom(descriptor)
@@ -76,7 +173,18 @@ impl FeedSource {
 
     /// Return true when the built-in Chainlink reactive handler should route this source.
     pub fn uses_builtin_chainlink_handler(&self) -> bool {
-        matches!(self, Self::Chainlink | Self::AavePriceCapStable { .. })
+        matches!(
+            self,
+            Self::Chainlink
+                | Self::AavePriceCapStable { .. }
+                | Self::AaveRatioCap { .. }
+                | Self::AaveSynchronicityPegToBase { .. }
+        )
+    }
+
+    /// Return true when this source can be reconciled by reading a Chainlink proxy.
+    pub fn supports_proxy_reconciliation(&self) -> bool {
+        !matches!(self, Self::AaveFixedPrice { .. })
     }
 
     /// Proxy that should be read for authoritative Chainlink round data.
@@ -86,16 +194,125 @@ impl FeedSource {
             Self::AavePriceCapStable {
                 underlying_proxy, ..
             } => *underlying_proxy,
+            Self::AaveRatioCap {
+                base_to_usd_proxy, ..
+            } => *base_to_usd_proxy,
+            Self::AaveSynchronicityPegToBase {
+                asset_to_peg_proxy, ..
+            } => *asset_to_peg_proxy,
+            Self::AaveFixedPrice { source, .. } => *source,
             Self::Custom(descriptor) => descriptor.read_proxy,
         }
     }
 
+    /// Aggregators whose Chainlink events should drive this source.
+    pub fn event_aggregators(&self, current_aggregator: Option<Address>) -> Vec<Address> {
+        match self {
+            Self::AaveSynchronicityPegToBase {
+                asset_to_peg_aggregator,
+                peg_to_base_aggregator,
+                ..
+            } => vec![*asset_to_peg_aggregator, *peg_to_base_aggregator],
+            Self::AaveFixedPrice { .. } => Vec::new(),
+            _ => current_aggregator.into_iter().collect(),
+        }
+    }
+
+    /// Return true when an event from `aggregator` is acceptable for this source.
+    pub fn accepts_event_from(
+        &self,
+        current_aggregator: Option<Address>,
+        aggregator: Address,
+    ) -> bool {
+        self.event_aggregators(current_aggregator)
+            .into_iter()
+            .any(|event_aggregator| event_aggregator == aggregator)
+    }
+
+    /// Return true when this source should use AnswerUpdated events for `aggregator`.
+    pub fn wants_answer_updated_from(
+        &self,
+        current_aggregator: Option<Address>,
+        aggregator: Address,
+    ) -> bool {
+        match self {
+            Self::AaveRatioCap { .. } | Self::AaveSynchronicityPegToBase { .. } => {
+                self.accepts_event_from(current_aggregator, aggregator)
+            }
+            _ => false,
+        }
+    }
+
+    /// Return true when Chainlink storage adapters can safely mirror this event.
+    pub fn supports_direct_chainlink_storage_effects(&self) -> bool {
+        !matches!(
+            self,
+            Self::AaveRatioCap { .. } | Self::AaveSynchronicityPegToBase { .. }
+        )
+    }
+
     /// Apply the source transform to an event or read answer.
     pub fn normalize_answer(&self, answer: I256) -> I256 {
+        self.normalize_answer_from_event(None, answer)
+    }
+
+    /// Apply the source transform to an answer emitted by a specific dependency aggregator.
+    pub fn normalize_answer_from_event(&self, aggregator: Option<Address>, answer: I256) -> I256 {
         match self {
             Self::Chainlink => answer,
             Self::AavePriceCapStable { price_cap, .. } if answer > *price_cap => *price_cap,
             Self::AavePriceCapStable { .. } => answer,
+            Self::AaveRatioCap {
+                current_ratio,
+                max_ratio,
+                ratio_decimals,
+                ..
+            } => {
+                if answer <= I256::ZERO || *current_ratio <= I256::ZERO {
+                    return I256::ZERO;
+                }
+                let capped_ratio = if current_ratio < max_ratio {
+                    *current_ratio
+                } else {
+                    *max_ratio
+                };
+                if capped_ratio <= I256::ZERO {
+                    return I256::ZERO;
+                }
+                div_or_zero(
+                    answer.saturating_mul(capped_ratio),
+                    decimal_scale(*ratio_decimals),
+                )
+            }
+            Self::AaveSynchronicityPegToBase {
+                asset_to_peg_aggregator,
+                asset_to_peg_answer,
+                asset_to_peg_decimals,
+                peg_to_base_aggregator,
+                peg_to_base_answer,
+                peg_to_base_decimals,
+                output_decimals,
+                ..
+            } => {
+                let asset_to_peg = if aggregator == Some(*asset_to_peg_aggregator) {
+                    answer
+                } else {
+                    *asset_to_peg_answer
+                };
+                let peg_to_base = if aggregator == Some(*peg_to_base_aggregator) {
+                    answer
+                } else {
+                    *peg_to_base_answer
+                };
+                normalize_synchronicity_answer(
+                    asset_to_peg,
+                    *asset_to_peg_decimals,
+                    peg_to_base,
+                    *peg_to_base_decimals,
+                    *output_decimals,
+                )
+            }
+            Self::AaveFixedPrice { price, .. } => *price,
             Self::Custom(descriptor) => match &descriptor.transform {
                 OracleTransformDescriptor::Identity | OracleTransformDescriptor::Custom { .. } => {
                     answer
@@ -108,9 +325,102 @@ impl FeedSource {
 
     /// Apply the source transform to round data.
     pub fn normalize_round(&self, mut round: RoundData) -> RoundData {
-        round.answer = self.normalize_answer(round.answer);
+        round.answer = match self {
+            Self::AaveSynchronicityPegToBase {
+                asset_to_peg_aggregator,
+                ..
+            } => self.normalize_answer_from_event(Some(*asset_to_peg_aggregator), round.answer),
+            _ => self.normalize_answer(round.answer),
+        };
         round
     }
+
+    pub(crate) fn normalize_dependency_answers(
+        &self,
+        asset_to_peg_answer: I256,
+        peg_to_base_answer: I256,
+    ) -> Option<I256> {
+        match self {
+            Self::AaveSynchronicityPegToBase {
+                asset_to_peg_decimals,
+                peg_to_base_decimals,
+                output_decimals,
+                ..
+            } => Some(normalize_synchronicity_answer(
+                asset_to_peg_answer,
+                *asset_to_peg_decimals,
+                peg_to_base_answer,
+                *peg_to_base_decimals,
+                *output_decimals,
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn with_synchronicity_dependency_state(
+        &self,
+        asset_to_peg_aggregator: Address,
+        asset_to_peg_answer: I256,
+        peg_to_base_aggregator: Address,
+        peg_to_base_answer: I256,
+    ) -> Option<Self> {
+        match self {
+            Self::AaveSynchronicityPegToBase {
+                source,
+                asset_to_peg_proxy,
+                asset_to_peg_decimals,
+                peg_to_base_proxy,
+                peg_to_base_decimals,
+                output_decimals,
+                ..
+            } => Some(Self::AaveSynchronicityPegToBase {
+                source: *source,
+                asset_to_peg_proxy: *asset_to_peg_proxy,
+                asset_to_peg_aggregator,
+                asset_to_peg_answer,
+                asset_to_peg_decimals: *asset_to_peg_decimals,
+                peg_to_base_proxy: *peg_to_base_proxy,
+                peg_to_base_aggregator,
+                peg_to_base_answer,
+                peg_to_base_decimals: *peg_to_base_decimals,
+                output_decimals: *output_decimals,
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn decimal_scale(decimals: u8) -> I256 {
+    let mut scale = I256::unchecked_from(1_i8);
+    for _ in 0..decimals {
+        scale = scale.saturating_mul(I256::unchecked_from(10_i8));
+    }
+    scale
+}
+
+fn div_or_zero(numerator: I256, denominator: I256) -> I256 {
+    if denominator == I256::ZERO {
+        I256::ZERO
+    } else {
+        numerator / denominator
+    }
+}
+
+fn normalize_synchronicity_answer(
+    asset_to_peg: I256,
+    asset_to_peg_decimals: u8,
+    peg_to_base: I256,
+    peg_to_base_decimals: u8,
+    output_decimals: u8,
+) -> I256 {
+    if asset_to_peg <= I256::ZERO || peg_to_base <= I256::ZERO {
+        return I256::ZERO;
+    }
+    let numerator = asset_to_peg
+        .saturating_mul(peg_to_base)
+        .saturating_mul(decimal_scale(output_decimals));
+    let denominator = decimal_scale(asset_to_peg_decimals.saturating_add(peg_to_base_decimals));
+    div_or_zero(numerator, denominator)
 }
 
 /// Registered Chainlink-compatible proxy feed.

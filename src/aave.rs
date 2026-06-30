@@ -1,13 +1,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, I256, U256};
 use evm_fork_cache::cache::EvmCache;
 
 use crate::{
     AssetId, Denomination, EvmCacheChainlinkReader, Feed, FeedConfig, FeedId, FeedMetadata,
     FeedSource, OracleAdapterBuildReport, OracleAdapterFeedSkip, OracleAdapterSkipReason,
     OracleError, OracleRegistry, OracleTracker, RoundData, StalenessPolicy,
-    cache_reader::AavePriceCapStableSource,
+    cache_reader::{AaveFixedPriceSource, AaveRatioCapSource},
 };
 
 /// Declarative Aave V3 asset source registration.
@@ -185,7 +185,9 @@ impl AaveV3OracleAdapter {
 
         let oracle = self.oracle;
         for asset in self.assets {
-            if let Some(skip) = Self::register_asset(oracle, &reader, &mut registry, asset).await? {
+            if let Some(skip) =
+                Self::register_asset(oracle, &reader, &mut registry, asset, now_timestamp).await?
+            {
                 skipped.push(skip);
             }
         }
@@ -201,6 +203,7 @@ impl AaveV3OracleAdapter {
         reader: &EvmCacheChainlinkReader<'_>,
         registry: &mut OracleRegistry,
         asset: AaveAsset,
+        now_timestamp: u64,
     ) -> Result<Option<OracleAdapterFeedSkip>, OracleError> {
         let source = match reader.read_aave_source(oracle, asset.asset()) {
             Ok(source) if source != Address::ZERO => source,
@@ -224,12 +227,13 @@ impl AaveV3OracleAdapter {
         match reader.register_feed(registry, feed.clone()).await {
             Ok(_) => Ok(None),
             Err(OracleError::Provider(chainlink_error)) => {
-                Self::try_register_price_cap_stable(
+                Self::try_register_aave_derived_source(
                     reader,
                     registry,
                     asset,
                     source,
                     chainlink_error,
+                    now_timestamp,
                 )
                 .await
             }
@@ -237,42 +241,61 @@ impl AaveV3OracleAdapter {
         }
     }
 
-    async fn try_register_price_cap_stable(
+    async fn try_register_aave_derived_source(
         reader: &EvmCacheChainlinkReader<'_>,
         registry: &mut OracleRegistry,
         asset: AaveAsset,
         source: Address,
         chainlink_error: String,
+        now_timestamp: u64,
     ) -> Result<Option<OracleAdapterFeedSkip>, OracleError> {
+        let mut errors = vec![format!("Chainlink-compatible ({chainlink_error})")];
+        match Self::register_price_cap_stable_source(reader, registry, &asset, source).await {
+            Ok(()) => return Ok(None),
+            Err(error) => errors.push(format!("Aave PriceCapAdapterStable ({error})")),
+        }
+        match Self::register_ratio_cap_source(reader, registry, &asset, source).await {
+            Ok(()) => return Ok(None),
+            Err(error) => errors.push(format!("Aave PriceCapAdapterBase/CAPO ({error})")),
+        }
+        match Self::register_synchronicity_peg_to_base_source(reader, registry, &asset, source)
+            .await
+        {
+            Ok(()) => return Ok(None),
+            Err(error) => errors.push(format!("Aave CLSynchronicity PegToBase ({error})")),
+        }
+        match Self::register_fixed_price_source(reader, registry, &asset, source, now_timestamp)
+            .await
+        {
+            Ok(()) => return Ok(None),
+            Err(error) => errors.push(format!("Aave fixed-price ({error})")),
+        }
+
+        Ok(Some(aave_skip(
+            &asset,
+            source,
+            format!(
+                "unsupported Aave source; probes failed: {}",
+                errors.join("; ")
+            ),
+        )))
+    }
+
+    async fn register_price_cap_stable_source(
+        reader: &EvmCacheChainlinkReader<'_>,
+        registry: &mut OracleRegistry,
+        asset: &AaveAsset,
+        source: Address,
+    ) -> Result<(), OracleError> {
         let capped = match reader.read_aave_price_cap_stable(source) {
             Ok(capped) => capped,
-            Err(error) => {
-                return Ok(Some(aave_skip(
-                    &asset,
-                    source,
-                    format!(
-                        "source is neither Chainlink-compatible ({chainlink_error}) nor Aave PriceCapAdapterStable ({error})"
-                    ),
-                )));
-            }
+            Err(error) => return Err(error),
         };
 
         let registration_source =
             FeedSource::aave_price_cap_stable(source, capped.underlying_proxy, capped.price_cap);
-        let (underlying_round, current_aggregator) = match read_underlying_chainlink(
-            reader, &capped,
-        ) {
-            Ok(values) => values,
-            Err(error) => {
-                return Ok(Some(aave_skip(
-                    &asset,
-                    source,
-                    format!(
-                        "Aave PriceCapAdapterStable underlying Chainlink source is unsupported: {error}"
-                    ),
-                )));
-            }
-        };
+        let (underlying_round, current_aggregator) =
+            read_underlying_chainlink(reader, capped.underlying_proxy)?;
 
         let mut seeded_round = underlying_round;
         seeded_round.answer = registration_source.normalize_answer(capped.latest_answer);
@@ -293,24 +316,169 @@ impl AaveV3OracleAdapter {
             )
             .await?;
 
-        Ok(None)
+        Ok(())
+    }
+
+    async fn register_ratio_cap_source(
+        reader: &EvmCacheChainlinkReader<'_>,
+        registry: &mut OracleRegistry,
+        asset: &AaveAsset,
+        source: Address,
+    ) -> Result<(), OracleError> {
+        let ratio = reader.read_aave_ratio_cap(source)?;
+        let (base_round, current_aggregator) =
+            read_underlying_chainlink(reader, ratio.base_to_usd_proxy)?;
+        let max_ratio = ratio_cap_max_ratio(&ratio, base_round.answer);
+        let registration_source = FeedSource::aave_ratio_cap(
+            source,
+            ratio.base_to_usd_proxy,
+            ratio.ratio_provider,
+            ratio.current_ratio,
+            max_ratio,
+            ratio.ratio_decimals,
+        );
+
+        let mut seeded_round = base_round;
+        seeded_round.answer = ratio.latest_answer;
+        let metadata = FeedMetadata {
+            decimals: ratio.decimals,
+            description: ratio.description,
+            version: U256::ZERO,
+        };
+
+        registry
+            .register_discovered_feed(
+                reader,
+                asset.config_for_source(source)?,
+                registration_source,
+                metadata,
+                seeded_round,
+                Some(current_aggregator),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn register_synchronicity_peg_to_base_source(
+        reader: &EvmCacheChainlinkReader<'_>,
+        registry: &mut OracleRegistry,
+        asset: &AaveAsset,
+        source: Address,
+    ) -> Result<(), OracleError> {
+        let synchronicity = reader.read_aave_synchronicity_peg_to_base(source)?;
+        let (asset_round, asset_aggregator) =
+            read_underlying_chainlink(reader, synchronicity.asset_to_peg_proxy)?;
+        let (peg_round, peg_aggregator) =
+            read_underlying_chainlink(reader, synchronicity.peg_to_base_proxy)?;
+        let asset_decimals = reader.read_decimals(synchronicity.asset_to_peg_proxy)?;
+        let peg_decimals = reader.read_decimals(synchronicity.peg_to_base_proxy)?;
+        let registration_source = FeedSource::aave_synchronicity_peg_to_base(
+            source,
+            synchronicity.asset_to_peg_proxy,
+            asset_aggregator,
+            asset_round.answer,
+            asset_decimals,
+            synchronicity.peg_to_base_proxy,
+            peg_aggregator,
+            peg_round.answer,
+            peg_decimals,
+            synchronicity.decimals,
+        );
+
+        let mut seeded_round = asset_round;
+        seeded_round.answer = synchronicity.latest_answer;
+        seeded_round.updated_at = seeded_round.updated_at.max(peg_round.updated_at);
+        let metadata = FeedMetadata {
+            decimals: synchronicity.decimals,
+            description: synchronicity.description,
+            version: U256::ZERO,
+        };
+
+        registry
+            .register_discovered_feed(
+                reader,
+                asset.config_for_source(source)?,
+                registration_source,
+                metadata,
+                seeded_round,
+                Some(asset_aggregator),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn register_fixed_price_source(
+        reader: &EvmCacheChainlinkReader<'_>,
+        registry: &mut OracleRegistry,
+        asset: &AaveAsset,
+        source: Address,
+        now_timestamp: u64,
+    ) -> Result<(), OracleError> {
+        let fixed = reader.read_aave_fixed_price(source)?;
+        let seeded_round = fixed_price_round(&fixed, now_timestamp);
+        let registration_source = FeedSource::aave_fixed_price(source, fixed.latest_answer);
+        let metadata = FeedMetadata {
+            decimals: fixed.decimals,
+            description: fixed.description,
+            version: U256::ZERO,
+        };
+        registry
+            .register_discovered_feed(
+                reader,
+                asset.config_for_source(source)?,
+                registration_source,
+                metadata,
+                seeded_round,
+                None,
+            )
+            .await?;
+
+        Ok(())
     }
 }
 
 fn read_underlying_chainlink(
     reader: &EvmCacheChainlinkReader<'_>,
-    capped: &AavePriceCapStableSource,
+    proxy: Address,
 ) -> Result<(RoundData, Address), OracleError> {
-    reader.read_decimals(capped.underlying_proxy)?;
-    reader.read_description(capped.underlying_proxy)?;
-    reader.read_version(capped.underlying_proxy)?;
-    let round = reader.read_latest_round_data(capped.underlying_proxy)?;
-    let aggregator = reader
-        .read_aggregator(capped.underlying_proxy)?
-        .ok_or_else(|| {
-            OracleError::Provider("underlying aggregator() returned none".to_string())
-        })?;
+    reader.read_decimals(proxy)?;
+    reader.read_description(proxy)?;
+    reader.read_version(proxy)?;
+    let round = reader.read_latest_round_data(proxy)?;
+    let aggregator = reader.read_aggregator(proxy)?.ok_or_else(|| {
+        OracleError::Provider("underlying aggregator() returned none".to_string())
+    })?;
     Ok((round, aggregator))
+}
+
+fn ratio_cap_max_ratio(ratio: &AaveRatioCapSource, base_answer: I256) -> I256 {
+    if !ratio.is_capped || base_answer == I256::ZERO {
+        return ratio.current_ratio;
+    }
+    ratio
+        .latest_answer
+        .saturating_mul(decimal_scale(ratio.ratio_decimals))
+        / base_answer
+}
+
+fn fixed_price_round(fixed: &AaveFixedPriceSource, now_timestamp: u64) -> RoundData {
+    RoundData {
+        round_id: U256::ZERO,
+        answer: fixed.latest_answer,
+        started_at: now_timestamp,
+        updated_at: now_timestamp,
+        answered_in_round: U256::ZERO,
+    }
+}
+
+fn decimal_scale(decimals: u8) -> I256 {
+    let mut scale = I256::unchecked_from(1_i8);
+    for _ in 0..decimals {
+        scale = scale.saturating_mul(I256::unchecked_from(10_i8));
+    }
+    scale
 }
 
 fn aave_skip(

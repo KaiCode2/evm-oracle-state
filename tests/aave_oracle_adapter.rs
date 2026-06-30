@@ -24,7 +24,7 @@ use evm_fork_cache::{
 };
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, AaveAsset, AaveV3OracleAdapter, AssetId, ChainlinkFeedProvider,
-    Denomination, FeedId, FeedMetadata, FeedRegistration, FeedSource, OracleHookEvent,
+    Denomination, FeedId, FeedMetadata, FeedRegistration, FeedSource, FeedStatus, OracleHookEvent,
     OraclePriceUpdate, OracleReactiveHandler, OracleReconciler, OracleTracker, ProviderFuture,
     RoundData, SnapshotSource, StalenessPolicy,
 };
@@ -141,6 +141,85 @@ fn aave_cap_registration(
             underlying_proxy,
             I256::unchecked_from(cap),
         ),
+    }
+}
+
+fn aave_ratio_cap_registration(
+    source: Address,
+    base_to_usd_proxy: Address,
+    base_to_usd_aggregator: Address,
+    ratio_provider: Address,
+    current_ratio: i64,
+    max_ratio: i64,
+    ratio_decimals: u8,
+) -> FeedRegistration {
+    FeedRegistration {
+        id: FeedId::new("aave-v3-wsteth"),
+        proxy: source,
+        label: Some("Aave V3 wstETH source".to_string()),
+        base: Some("wstETH".to_string()),
+        quote: Some("USD".to_string()),
+        staleness: StalenessPolicy::max_age(24 * 60 * 60),
+        current_aggregator: Some(base_to_usd_aggregator),
+        aggregator_layout: None,
+        metadata: metadata("Capped wstETH/USD"),
+        source: FeedSource::aave_ratio_cap(
+            source,
+            base_to_usd_proxy,
+            ratio_provider,
+            I256::unchecked_from(current_ratio),
+            I256::unchecked_from(max_ratio),
+            ratio_decimals,
+        ),
+    }
+}
+
+fn aave_synchronicity_peg_to_base_registration(
+    source: Address,
+    asset_to_peg_proxy: Address,
+    asset_to_peg_aggregator: Address,
+    asset_to_peg_answer: i64,
+    peg_to_base_proxy: Address,
+    peg_to_base_aggregator: Address,
+    peg_to_base_answer: i64,
+) -> FeedRegistration {
+    FeedRegistration {
+        id: FeedId::new("aave-v3-wbtc"),
+        proxy: source,
+        label: Some("Aave V3 WBTC source".to_string()),
+        base: Some("WBTC".to_string()),
+        quote: Some("USD".to_string()),
+        staleness: StalenessPolicy::max_age(24 * 60 * 60),
+        current_aggregator: Some(asset_to_peg_aggregator),
+        aggregator_layout: None,
+        metadata: metadata("Composed WBTC/USD"),
+        source: FeedSource::aave_synchronicity_peg_to_base(
+            source,
+            asset_to_peg_proxy,
+            asset_to_peg_aggregator,
+            I256::unchecked_from(asset_to_peg_answer),
+            8,
+            peg_to_base_proxy,
+            peg_to_base_aggregator,
+            I256::unchecked_from(peg_to_base_answer),
+            8,
+            8,
+        ),
+    }
+}
+
+fn aave_fixed_price_registration(source: Address, price: i64) -> FeedRegistration {
+    FeedRegistration {
+        id: FeedId::new("aave-v3-musd"),
+        proxy: source,
+        label: Some("Aave V3 mUSD source".to_string()),
+        base: Some("mUSD".to_string()),
+        quote: Some("USD".to_string()),
+        staleness: StalenessPolicy::max_age(24 * 60 * 60),
+        current_aggregator: None,
+        aggregator_layout: None,
+        metadata: metadata("Fixed mUSD/USD"),
+        source: FeedSource::aave_fixed_price(source, I256::unchecked_from(price)),
     }
 }
 
@@ -283,6 +362,417 @@ async fn price_cap_stable_underlying_event_emits_aave_normalized_price() {
 }
 
 #[tokio::test]
+async fn ratio_cap_underlying_event_emits_capped_aave_price() {
+    let source = Address::repeat_byte(0x30);
+    let base_to_usd_proxy = Address::repeat_byte(0x31);
+    let base_to_usd_aggregator = Address::repeat_byte(0x32);
+    let ratio_provider = Address::repeat_byte(0x33);
+    let registration = aave_ratio_cap_registration(
+        source,
+        base_to_usd_proxy,
+        base_to_usd_aggregator,
+        ratio_provider,
+        1_080_000_000_000_000_000,
+        1_050_000_000_000_000_000,
+        18,
+    );
+    let mut tracker = OracleTracker::from_registrations_at_timestamp(
+        vec![(
+            registration.clone(),
+            round(100, 2_058_000_000, 1_700_000_000),
+        )],
+        1_700_000_200,
+    )
+    .expect("seed tracker");
+    let handler = OracleReactiveHandler::new(tracker.registrations().collect::<Vec<_>>());
+    let matching_interest = handler
+        .interests()
+        .into_iter()
+        .find_map(|interest| match interest {
+            ReactiveInterest::Logs(interest) => {
+                let log = rpc_log(
+                    base_to_usd_aggregator,
+                    vec![
+                        ANSWER_UPDATED_TOPIC,
+                        int_topic(I256::unchecked_from(2_000_000_000_i64)),
+                        uint_topic(U256::from(101_u64)),
+                    ],
+                    word(U256::from(1_700_000_180_u64)),
+                    103,
+                    0,
+                );
+                interest.matches(&log).then_some(interest)
+            }
+            _ => None,
+        })
+        .expect("ratio-cap source should subscribe to its base Chainlink aggregator");
+    assert_eq!(
+        matching_interest.route_key(&rpc_log(
+            base_to_usd_aggregator,
+            vec![
+                ANSWER_UPDATED_TOPIC,
+                int_topic(I256::unchecked_from(2_000_000_000_i64)),
+                uint_topic(U256::from(101_u64)),
+            ],
+            word(U256::from(1_700_000_180_u64)),
+            103,
+            0,
+        )),
+        Some(RouteKey::Address(base_to_usd_aggregator))
+    );
+
+    let mut runtime = ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default());
+    runtime
+        .register_handler(Arc::new(handler))
+        .expect("register handler");
+    let mut cache = setup_cache().await;
+    let log = rpc_log(
+        base_to_usd_aggregator,
+        vec![
+            ANSWER_UPDATED_TOPIC,
+            int_topic(I256::unchecked_from(2_000_000_000_i64)),
+            uint_topic(U256::from(101_u64)),
+        ],
+        word(U256::from(1_700_000_180_u64)),
+        103,
+        0,
+    );
+    let batch_report = runtime
+        .ingest_batch(&mut cache, batch(ReactiveInput::Log(log), context(103, 0)))
+        .expect("runtime should commit handler effects");
+
+    let hooks = price_update_hooks(&batch_report.applied[0].hook_signals);
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(hooks[0].proxy, source);
+    assert_eq!(hooks[0].aggregator, base_to_usd_aggregator);
+    assert_eq!(hooks[0].raw_answer, I256::unchecked_from(2_100_000_000_i64));
+
+    tracker
+        .apply_batch_report(&batch_report)
+        .expect("committed report should update typed state");
+    let snapshot = tracker.latest(source).expect("ratio-cap event snapshot");
+    assert_eq!(
+        snapshot.round.answer,
+        I256::unchecked_from(2_100_000_000_i64)
+    );
+    assert_eq!(tracker.pending_reconciliations()[0].proxy, source);
+}
+
+#[tokio::test]
+async fn synchronicity_secondary_dependency_event_updates_user_facing_source() {
+    let source = Address::repeat_byte(0x40);
+    let asset_to_peg_proxy = Address::repeat_byte(0x41);
+    let asset_to_peg_aggregator = Address::repeat_byte(0x42);
+    let peg_to_base_proxy = Address::repeat_byte(0x43);
+    let peg_to_base_aggregator = Address::repeat_byte(0x44);
+    let registration = aave_synchronicity_peg_to_base_registration(
+        source,
+        asset_to_peg_proxy,
+        asset_to_peg_aggregator,
+        50_000_000,
+        peg_to_base_proxy,
+        peg_to_base_aggregator,
+        200_000_000_000,
+    );
+    let mut tracker = OracleTracker::from_registrations_at_timestamp(
+        vec![(
+            registration.clone(),
+            round(100, 100_000_000_000, 1_700_000_000),
+        )],
+        1_700_000_200,
+    )
+    .expect("seed tracker");
+    let handler = OracleReactiveHandler::new(tracker.registrations().collect::<Vec<_>>());
+    let matching_interest = handler
+        .interests()
+        .into_iter()
+        .find_map(|interest| match interest {
+            ReactiveInterest::Logs(interest) => {
+                let log = rpc_log(
+                    peg_to_base_aggregator,
+                    vec![
+                        ANSWER_UPDATED_TOPIC,
+                        int_topic(I256::unchecked_from(210_000_000_000_i64)),
+                        uint_topic(U256::from(101_u64)),
+                    ],
+                    word(U256::from(1_700_000_180_u64)),
+                    104,
+                    0,
+                );
+                interest.matches(&log).then_some(interest)
+            }
+            _ => None,
+        })
+        .expect("synchronicity source should subscribe to secondary dependency aggregator");
+    assert_eq!(
+        matching_interest.route_key(&rpc_log(
+            peg_to_base_aggregator,
+            vec![
+                ANSWER_UPDATED_TOPIC,
+                int_topic(I256::unchecked_from(210_000_000_000_i64)),
+                uint_topic(U256::from(101_u64)),
+            ],
+            word(U256::from(1_700_000_180_u64)),
+            104,
+            0,
+        )),
+        Some(RouteKey::Address(peg_to_base_aggregator))
+    );
+
+    let mut runtime = ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default());
+    runtime
+        .register_handler(Arc::new(handler))
+        .expect("register handler");
+    let mut cache = setup_cache().await;
+    let log = rpc_log(
+        peg_to_base_aggregator,
+        vec![
+            ANSWER_UPDATED_TOPIC,
+            int_topic(I256::unchecked_from(210_000_000_000_i64)),
+            uint_topic(U256::from(101_u64)),
+        ],
+        word(U256::from(1_700_000_180_u64)),
+        104,
+        0,
+    );
+    let batch_report = runtime
+        .ingest_batch(&mut cache, batch(ReactiveInput::Log(log), context(104, 0)))
+        .expect("runtime should commit handler effects");
+
+    let hooks = price_update_hooks(&batch_report.applied[0].hook_signals);
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(hooks[0].proxy, source);
+    assert_eq!(hooks[0].aggregator, peg_to_base_aggregator);
+    assert_eq!(
+        hooks[0].raw_answer,
+        I256::unchecked_from(105_000_000_000_i64)
+    );
+
+    tracker
+        .apply_batch_report(&batch_report)
+        .expect("committed secondary dependency update should update typed state");
+    let snapshot = tracker
+        .latest(source)
+        .expect("synchronicity event snapshot");
+    assert_eq!(
+        snapshot.round.answer,
+        I256::unchecked_from(105_000_000_000_i64)
+    );
+    assert_eq!(tracker.pending_reconciliations()[0].proxy, source);
+}
+
+#[test]
+fn fixed_price_aave_source_has_no_chainlink_event_interest() {
+    let source = Address::repeat_byte(0x50);
+    let registration = aave_fixed_price_registration(source, 100_000_000);
+    let tracker = OracleTracker::from_registrations_at_timestamp(
+        vec![(registration, round(1, 100_000_000, 1_700_000_000))],
+        1_700_000_200,
+    )
+    .expect("seed tracker");
+
+    let handler = OracleReactiveHandler::new(tracker.registrations().collect::<Vec<_>>());
+    assert!(
+        handler.interests().is_empty(),
+        "fixed-price Aave sources should be seeded but not subscribed as Chainlink feeds"
+    );
+    let snapshot = tracker.latest(source).expect("fixed source snapshot");
+    assert_eq!(snapshot.round.answer, I256::unchecked_from(100_000_000_i64));
+    assert_eq!(snapshot.status, FeedStatus::Fresh);
+}
+
+#[test]
+fn derived_aave_sources_zero_non_positive_dependency_answers() {
+    let source = Address::repeat_byte(0x60);
+    let base_to_usd_proxy = Address::repeat_byte(0x61);
+    let base_to_usd_aggregator = Address::repeat_byte(0x62);
+    let ratio_provider = Address::repeat_byte(0x63);
+    let ratio_cap = FeedSource::aave_ratio_cap(
+        source,
+        base_to_usd_proxy,
+        ratio_provider,
+        I256::unchecked_from(1_050_000_000_000_000_000_i64),
+        I256::unchecked_from(1_050_000_000_000_000_000_i64),
+        18,
+    );
+    assert_eq!(
+        ratio_cap
+            .normalize_answer_from_event(Some(base_to_usd_aggregator), I256::unchecked_from(0_i64)),
+        I256::ZERO
+    );
+
+    let asset_to_peg_aggregator = Address::repeat_byte(0x64);
+    let peg_to_base_aggregator = Address::repeat_byte(0x65);
+    let synchronicity = FeedSource::aave_synchronicity_peg_to_base(
+        source,
+        Address::repeat_byte(0x66),
+        asset_to_peg_aggregator,
+        I256::unchecked_from(50_000_000_i64),
+        8,
+        Address::repeat_byte(0x67),
+        peg_to_base_aggregator,
+        I256::unchecked_from(200_000_000_000_i64),
+        8,
+        8,
+    );
+    assert_eq!(
+        synchronicity.normalize_answer_from_event(
+            Some(peg_to_base_aggregator),
+            I256::unchecked_from(-1_i64)
+        ),
+        I256::ZERO
+    );
+}
+
+#[tokio::test]
+async fn synchronicity_secondary_dependency_reconciliation_reads_both_legs_and_confirms() {
+    let source = Address::repeat_byte(0x70);
+    let asset_to_peg_proxy = Address::repeat_byte(0x71);
+    let asset_to_peg_aggregator = Address::repeat_byte(0x72);
+    let peg_to_base_proxy = Address::repeat_byte(0x73);
+    let peg_to_base_aggregator = Address::repeat_byte(0x74);
+    let registration = aave_synchronicity_peg_to_base_registration(
+        source,
+        asset_to_peg_proxy,
+        asset_to_peg_aggregator,
+        50_000_000,
+        peg_to_base_proxy,
+        peg_to_base_aggregator,
+        200_000_000_000,
+    );
+    let mut tracker = OracleTracker::from_registrations_at_timestamp(
+        vec![(
+            registration.clone(),
+            round(100, 100_000_000_000, 1_700_000_000),
+        )],
+        1_700_000_200,
+    )
+    .expect("seed tracker");
+    let handler = OracleReactiveHandler::new(tracker.registrations().collect::<Vec<_>>());
+    let mut runtime = ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default());
+    runtime
+        .register_handler(Arc::new(handler))
+        .expect("register handler");
+    let mut cache = setup_cache().await;
+    let log = rpc_log(
+        peg_to_base_aggregator,
+        vec![
+            ANSWER_UPDATED_TOPIC,
+            int_topic(I256::unchecked_from(210_000_000_000_i64)),
+            uint_topic(U256::from(101_u64)),
+        ],
+        word(U256::from(1_700_000_180_u64)),
+        105,
+        0,
+    );
+    let batch_report = runtime
+        .ingest_batch(&mut cache, batch(ReactiveInput::Log(log), context(105, 0)))
+        .expect("runtime should commit handler effects");
+    tracker
+        .apply_batch_report(&batch_report)
+        .expect("committed secondary dependency update should update typed state");
+
+    let request = tracker.pending_reconciliations()[0].clone();
+    let provider = MultiProxyProvider::new([
+        (
+            asset_to_peg_proxy,
+            asset_to_peg_aggregator,
+            round(100, 50_000_000, 1_700_000_000),
+        ),
+        (
+            peg_to_base_proxy,
+            peg_to_base_aggregator,
+            round(101, 210_000_000_000, 1_700_000_180),
+        ),
+    ]);
+    let mut reconciler = OracleReconciler::default();
+    reconciler.enqueue(request);
+    let result = reconciler
+        .reconcile_next(&mut tracker, &provider)
+        .await
+        .expect("reconcile should succeed")
+        .expect("request should reconcile");
+
+    assert_eq!(
+        provider.latest_round_calls(),
+        vec![asset_to_peg_proxy, peg_to_base_proxy]
+    );
+    assert!(matches!(
+        result.hooks.as_slice(),
+        [OracleHookEvent::PriceConfirmed(confirmed)]
+            if confirmed.proxy == source
+                && confirmed.raw_answer == I256::unchecked_from(105_000_000_000_i64)
+                && confirmed.proxy_round.answer == I256::unchecked_from(105_000_000_000_i64)
+                && confirmed.proxy_round.round_id == U256::from(101_u64)
+    ));
+    let snapshot = tracker
+        .latest(source)
+        .expect("confirmed synchronicity source snapshot");
+    assert_eq!(
+        snapshot.round.answer,
+        I256::unchecked_from(105_000_000_000_i64)
+    );
+    assert!(!snapshot.requires_reconciliation());
+}
+
+#[tokio::test]
+async fn synchronicity_full_reconcile_reads_both_legs() {
+    let source = Address::repeat_byte(0x80);
+    let asset_to_peg_proxy = Address::repeat_byte(0x81);
+    let asset_to_peg_aggregator = Address::repeat_byte(0x82);
+    let peg_to_base_proxy = Address::repeat_byte(0x83);
+    let peg_to_base_aggregator = Address::repeat_byte(0x84);
+    let registration = aave_synchronicity_peg_to_base_registration(
+        source,
+        asset_to_peg_proxy,
+        asset_to_peg_aggregator,
+        50_000_000,
+        peg_to_base_proxy,
+        peg_to_base_aggregator,
+        200_000_000_000,
+    );
+    let mut tracker = OracleTracker::from_registrations_at_timestamp(
+        vec![(
+            registration.clone(),
+            round(100, 100_000_000_000, 1_700_000_000),
+        )],
+        1_700_000_200,
+    )
+    .expect("seed tracker");
+    let provider = MultiProxyProvider::new([
+        (
+            asset_to_peg_proxy,
+            asset_to_peg_aggregator,
+            round(100, 50_000_000, 1_700_000_000),
+        ),
+        (
+            peg_to_base_proxy,
+            peg_to_base_aggregator,
+            round(101, 210_000_000_000, 1_700_000_180),
+        ),
+    ]);
+
+    let report = tracker
+        .reconcile(&provider)
+        .await
+        .expect("full reconcile should succeed");
+
+    assert_eq!(report.checked_feeds, 1);
+    assert_eq!(
+        provider.latest_round_calls(),
+        vec![asset_to_peg_proxy, peg_to_base_proxy]
+    );
+    let snapshot = tracker
+        .latest(source)
+        .expect("reconciled synchronicity source snapshot");
+    assert_eq!(
+        snapshot.round.answer,
+        I256::unchecked_from(105_000_000_000_i64)
+    );
+    assert_eq!(snapshot.round.updated_at, 1_700_000_180);
+}
+
+#[tokio::test]
 async fn price_cap_stable_reconciliation_reads_underlying_proxy_and_confirms_capped_round() {
     let source = Address::repeat_byte(0x20);
     let underlying_proxy = Address::repeat_byte(0x21);
@@ -345,6 +835,96 @@ async fn price_cap_stable_reconciliation_reads_underlying_proxy_and_confirms_cap
         .expect("confirmed Aave source snapshot");
     assert_eq!(snapshot.round.answer, I256::unchecked_from(cap));
     assert!(!snapshot.requires_reconciliation());
+}
+
+#[derive(Clone, Debug)]
+struct MultiProxyProvider {
+    feeds: BTreeMap<Address, (Address, RoundData)>,
+    latest_round_calls: Arc<Mutex<Vec<Address>>>,
+}
+
+impl MultiProxyProvider {
+    fn new(feeds: impl IntoIterator<Item = (Address, Address, RoundData)>) -> Self {
+        Self {
+            feeds: feeds
+                .into_iter()
+                .map(|(proxy, aggregator, round)| (proxy, (aggregator, round)))
+                .collect(),
+            latest_round_calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn latest_round_calls(&self) -> Vec<Address> {
+        self.latest_round_calls.lock().unwrap().clone()
+    }
+}
+
+impl ChainlinkFeedProvider for MultiProxyProvider {
+    fn decimals(&self, _proxy: Address) -> ProviderFuture<'_, u8> {
+        Box::pin(async { Ok(8) })
+    }
+
+    fn description(&self, _proxy: Address) -> ProviderFuture<'_, String> {
+        Box::pin(async { Ok("dependency".to_string()) })
+    }
+
+    fn version(&self, _proxy: Address) -> ProviderFuture<'_, U256> {
+        Box::pin(async { Ok(U256::from(1_u64)) })
+    }
+
+    fn latest_round_data(&self, proxy: Address) -> ProviderFuture<'_, RoundData> {
+        self.latest_round_data_at(proxy, None)
+    }
+
+    fn latest_round_data_at(
+        &self,
+        proxy: Address,
+        _block: Option<evm_oracle_state::OracleBlockRef>,
+    ) -> ProviderFuture<'_, RoundData> {
+        self.latest_round_calls.lock().unwrap().push(proxy);
+        let round = self
+            .feeds
+            .get(&proxy)
+            .unwrap_or_else(|| panic!("unexpected latestRoundData proxy {proxy:?}"))
+            .1
+            .clone();
+        Box::pin(async move { Ok(round) })
+    }
+
+    fn aggregator(&self, proxy: Address) -> ProviderFuture<'_, Option<Address>> {
+        self.aggregator_at(proxy, None)
+    }
+
+    fn aggregator_at(
+        &self,
+        proxy: Address,
+        _block: Option<evm_oracle_state::OracleBlockRef>,
+    ) -> ProviderFuture<'_, Option<Address>> {
+        let aggregator = self
+            .feeds
+            .get(&proxy)
+            .unwrap_or_else(|| panic!("unexpected aggregator proxy {proxy:?}"))
+            .0;
+        Box::pin(async move { Ok(Some(aggregator)) })
+    }
+
+    fn aggregator_type_and_version(
+        &self,
+        _aggregator: Address,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<String>, evm_oracle_state::OracleError>> + Send + '_>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn aggregator_code_hash(
+        &self,
+        _aggregator: Address,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<B256>, evm_oracle_state::OracleError>> + Send + '_>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[derive(Clone, Debug)]

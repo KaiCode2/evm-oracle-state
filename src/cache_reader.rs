@@ -49,8 +49,65 @@ sol! {
         function description() external view returns (string);
         function latestAnswer() external view returns (int256);
     }
+
+    interface AaveRatioCapAdapterInterface {
+        function BASE_TO_USD_AGGREGATOR() external view returns (address);
+        function RATIO_PROVIDER() external view returns (address);
+        function RATIO_DECIMALS() external view returns (uint8);
+        function getRatio() external view returns (int256);
+        function isCapped() external view returns (bool);
+        function decimals() external view returns (uint8);
+        function description() external view returns (string);
+        function latestAnswer() external view returns (int256);
+    }
+
+    interface AaveSynchronicityPegToBaseInterface {
+        function ASSET_TO_PEG() external view returns (address);
+        function PEG_TO_BASE() external view returns (address);
+        function decimals() external view returns (uint8);
+        function description() external view returns (string);
+        function latestAnswer() external view returns (int256);
+    }
+
+    interface AaveFixedPriceSourceInterface {
+        function price() external view returns (int256);
+        function decimals() external view returns (uint8);
+        function description() external view returns (string);
+        function latestAnswer() external view returns (int256);
+    }
+
+    interface AaveConstantPriceSourceInterface {
+        function PRICE() external view returns (int256);
+    }
+
+    interface AaveBaseToPegProbeInterface {
+        function BASE_TO_PEG() external view returns (address);
+    }
+
+    interface AaveDynamicSourceProbeInterface {
+        function REFERENCE_FEED() external view returns (address);
+        function DISCOUNT_RATE() external view returns (uint256);
+        function discount() external view returns (uint256);
+        function EXCHANGE_RATE() external view returns (uint256);
+        function PENDLE_PRINCIPAL_TOKEN() external view returns (address);
+        function PENDLE_ORACLE() external view returns (address);
+    }
 }
 
+#[cfg(feature = "aave")]
+use AaveBaseToPegProbeInterface::BASE_TO_PEGCall;
+#[cfg(feature = "aave")]
+use AaveConstantPriceSourceInterface::PRICECall;
+#[cfg(feature = "aave")]
+use AaveDynamicSourceProbeInterface::{
+    DISCOUNT_RATECall, EXCHANGE_RATECall, PENDLE_ORACLECall, PENDLE_PRINCIPAL_TOKENCall,
+    REFERENCE_FEEDCall, discountCall,
+};
+#[cfg(feature = "aave")]
+use AaveFixedPriceSourceInterface::{
+    decimalsCall as aaveFixedDecimalsCall, descriptionCall as aaveFixedDescriptionCall,
+    latestAnswerCall as aaveFixedLatestAnswerCall, priceCall as aaveFixedPriceCall,
+};
 #[cfg(feature = "aave")]
 use AaveOracleInterface::getSourceOfAssetCall;
 #[cfg(feature = "aave")]
@@ -58,12 +115,55 @@ use AavePriceCapAdapterStableInterface::{
     ASSET_TO_USD_AGGREGATORCall, decimalsCall as aaveDecimalsCall,
     descriptionCall as aaveDescriptionCall, getPriceCapCall, latestAnswerCall,
 };
+#[cfg(feature = "aave")]
+use AaveRatioCapAdapterInterface::{
+    BASE_TO_USD_AGGREGATORCall, RATIO_DECIMALSCall, RATIO_PROVIDERCall,
+    decimalsCall as aaveRatioDecimalsCall, descriptionCall as aaveRatioDescriptionCall,
+    getRatioCall, isCappedCall, latestAnswerCall as aaveRatioLatestAnswerCall,
+};
+#[cfg(feature = "aave")]
+use AaveSynchronicityPegToBaseInterface::{
+    ASSET_TO_PEGCall, PEG_TO_BASECall, decimalsCall as aaveSynchronicityDecimalsCall,
+    descriptionCall as aaveSynchronicityDescriptionCall,
+    latestAnswerCall as aaveSynchronicityLatestAnswerCall,
+};
 
 #[cfg(feature = "aave")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AavePriceCapStableSource {
     pub(crate) underlying_proxy: Address,
     pub(crate) price_cap: I256,
+    pub(crate) decimals: u8,
+    pub(crate) description: String,
+    pub(crate) latest_answer: I256,
+}
+
+#[cfg(feature = "aave")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AaveRatioCapSource {
+    pub(crate) base_to_usd_proxy: Address,
+    pub(crate) ratio_provider: Address,
+    pub(crate) current_ratio: I256,
+    pub(crate) is_capped: bool,
+    pub(crate) ratio_decimals: u8,
+    pub(crate) decimals: u8,
+    pub(crate) description: String,
+    pub(crate) latest_answer: I256,
+}
+
+#[cfg(feature = "aave")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AaveSynchronicityPegToBaseSource {
+    pub(crate) asset_to_peg_proxy: Address,
+    pub(crate) peg_to_base_proxy: Address,
+    pub(crate) decimals: u8,
+    pub(crate) description: String,
+    pub(crate) latest_answer: I256,
+}
+
+#[cfg(feature = "aave")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AaveFixedPriceSource {
     pub(crate) decimals: u8,
     pub(crate) description: String,
     pub(crate) latest_answer: I256,
@@ -205,6 +305,218 @@ impl<'a> EvmCacheChainlinkReader<'a> {
             description,
             latest_answer,
         })
+    }
+
+    #[cfg(feature = "aave")]
+    pub(crate) fn read_aave_ratio_cap(
+        &self,
+        source: Address,
+    ) -> Result<AaveRatioCapSource, OracleError> {
+        let base_to_usd_proxy = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, BASE_TO_USD_AGGREGATORCall {})
+            .map_err(provider_error)?;
+        let ratio_provider = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, RATIO_PROVIDERCall {})
+            .map_err(provider_error)?;
+        let current_ratio = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, getRatioCall {})
+            .map_err(provider_error)?;
+        let is_capped = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, isCappedCall {})
+            .map_err(provider_error)?;
+        let ratio_decimals = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, RATIO_DECIMALSCall {})
+            .map_err(provider_error)?;
+        let decimals = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveRatioDecimalsCall {})
+            .map_err(provider_error)?;
+        let description = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveRatioDescriptionCall {})
+            .map_err(provider_error)?;
+        let latest_answer = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveRatioLatestAnswerCall {})
+            .map_err(provider_error)?;
+
+        Ok(AaveRatioCapSource {
+            base_to_usd_proxy,
+            ratio_provider,
+            current_ratio,
+            is_capped,
+            ratio_decimals,
+            decimals,
+            description,
+            latest_answer,
+        })
+    }
+
+    #[cfg(feature = "aave")]
+    pub(crate) fn read_aave_synchronicity_peg_to_base(
+        &self,
+        source: Address,
+    ) -> Result<AaveSynchronicityPegToBaseSource, OracleError> {
+        let asset_to_peg_proxy = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, ASSET_TO_PEGCall {})
+            .map_err(provider_error)?;
+        let peg_to_base_proxy = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, PEG_TO_BASECall {})
+            .map_err(provider_error)?;
+        let decimals = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveSynchronicityDecimalsCall {})
+            .map_err(provider_error)?;
+        let description = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveSynchronicityDescriptionCall {})
+            .map_err(provider_error)?;
+        let latest_answer = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveSynchronicityLatestAnswerCall {})
+            .map_err(provider_error)?;
+
+        Ok(AaveSynchronicityPegToBaseSource {
+            asset_to_peg_proxy,
+            peg_to_base_proxy,
+            decimals,
+            description,
+            latest_answer,
+        })
+    }
+
+    #[cfg(feature = "aave")]
+    pub(crate) fn read_aave_fixed_price(
+        &self,
+        source: Address,
+    ) -> Result<AaveFixedPriceSource, OracleError> {
+        if self.has_known_aave_dependency_or_config(source) {
+            return Err(OracleError::Provider(
+                "source exposes dependency/config view(s); not fixed-price".to_string(),
+            ));
+        }
+        let fixed_price = self.read_fixed_price_value(source)?;
+        let decimals = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveFixedDecimalsCall {})
+            .map_err(provider_error)?;
+        let description = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveFixedDescriptionCall {})
+            .map_err(provider_error)?;
+        let latest_answer = self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveFixedLatestAnswerCall {})
+            .map_err(provider_error)?;
+        if latest_answer != fixed_price {
+            return Err(OracleError::Provider(
+                "latestAnswer() does not match fixed price getter".to_string(),
+            ));
+        }
+
+        Ok(AaveFixedPriceSource {
+            decimals,
+            description,
+            latest_answer,
+        })
+    }
+
+    #[cfg(feature = "aave")]
+    fn read_fixed_price_value(&self, source: Address) -> Result<I256, OracleError> {
+        match self
+            .cache
+            .borrow_mut()
+            .call_sol(source, aaveFixedPriceCall {})
+        {
+            Ok(price) => Ok(price),
+            Err(price_error) => match self.cache.borrow_mut().call_sol(source, PRICECall {}) {
+                Ok(price) => Ok(price),
+                Err(constant_error) => Err(OracleError::Provider(format!(
+                    "missing fixed-price getter price() ({price_error:?}) or PRICE() ({constant_error:?})"
+                ))),
+            },
+        }
+    }
+
+    #[cfg(feature = "aave")]
+    fn has_known_aave_dependency_or_config(&self, source: Address) -> bool {
+        self.cache
+            .borrow_mut()
+            .call_sol(source, ASSET_TO_USD_AGGREGATORCall {})
+            .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, BASE_TO_USD_AGGREGATORCall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, ASSET_TO_PEGCall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, PEG_TO_BASECall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, BASE_TO_PEGCall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, REFERENCE_FEEDCall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, DISCOUNT_RATECall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, discountCall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, EXCHANGE_RATECall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, PENDLE_PRINCIPAL_TOKENCall {})
+                .is_ok()
+            || self
+                .cache
+                .borrow_mut()
+                .call_sol(source, PENDLE_ORACLECall {})
+                .is_ok()
     }
 }
 

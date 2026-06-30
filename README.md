@@ -51,7 +51,8 @@ aggregator changes, and post-reorg safety still use
   `OracleAdapter::builder().feed(Feed::proxy(...))` groundwork over `EvmCache`.
 - With the `aave` feature, use `AaveV3OracleAdapter` and `AaveAsset` to
   discover Aave V3 oracle sources from `getSourceOfAsset`, including
-  `PriceCapAdapterStable` sources backed by underlying Chainlink feeds.
+  `PriceCapAdapterStable`, ratio-cap/CAPO, peg-to-base Chainlink
+  synchronicity, and fixed-price sources.
 - Queue event-specific, block-identified proxy reconciliation requests after
   committed price updates.
 - Serve simulation-facing `latestRoundData()`, `decimals()`, `description()`,
@@ -277,9 +278,17 @@ built-in Chainlink-compatible handler.
 
 - No durable database or indexer.
 - No Chainlink Feed Registry integration.
-- Aave source discovery currently supports plain Chainlink-compatible sources
-  and `PriceCapAdapterStable`; ratio, PT, fixed-price, and other adapter
-  variants are reported as skipped sources.
+- Aave source discovery currently supports plain Chainlink-compatible sources,
+  `PriceCapAdapterStable`, ratio-cap/CAPO, peg-to-base Chainlink
+  synchronicity, and fixed-price sources. EUR cap variants, base-to-peg and
+  fixed-ratio synchronicity, Pendle caps, and discounted MKR/SKY remain skipped
+  until dedicated source models are added.
+- Multi-dependency Aave peg-to-base synchronicity events are actionable
+  immediately using the seeded companion dependency answer, and event-specific
+  reconciliation reads both dependency proxies before confirming or correcting
+  the derived price. Rebuild the reactive handler after reconciliation to
+  refresh dependency routing; a later stateful dependency graph can remove that
+  limitation.
 - Direct storage writes are limited to detected OCR1/OCR2 layouts; unsupported
   or unknown layouts fall back to purge/refetch.
 - No in-cache generic call interceptor in the current `evm-fork-cache` surface;
@@ -338,9 +347,9 @@ Aave oracle sources with the cache-native reader, prints the reactive oracle log
 interests, computes collateral/debt/health-factor math locally, and compares the
 result with Aave `getUserAccountData` read through the same cache. Build it with
 `--features aave` to discover Aave sources from asset addresses, including
-`PriceCapAdapterStable` sources backed by underlying Chainlink feeds. It then
-registers the oracle interests with
-`evm-fork-cache`'s `AlloySubscriber`; every `OraclePriceUpdate` hook prints the
-new oracle answer and recomputes the health factor from the event-mutated cache.
-It also prints the DeBank CLI command used for an off-chain portfolio sanity
-check.
+`PriceCapAdapterStable`, ratio-cap/CAPO, peg-to-base synchronicity, and
+fixed-price sources backed by cache-native reads. It then registers the oracle
+interests with `evm-fork-cache`'s `AlloySubscriber`; every `OraclePriceUpdate`
+hook prints the new oracle answer and recomputes the health factor from the
+event-mutated cache. It also prints the DeBank CLI command used for an
+off-chain portfolio sanity check.

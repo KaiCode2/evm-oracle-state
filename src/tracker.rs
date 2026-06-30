@@ -4,9 +4,9 @@ use evm_fork_cache::reactive::{ReactiveBatchReport, ReactiveReport};
 
 use crate::{
     AggregatorChange, AggregatorLayoutEvidence, ChainlinkFeedProvider, FeedId, FeedRegistration,
-    ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE, OracleBlockRef, OracleError,
-    OraclePrice, OracleRegistry, OracleSignalKind, OracleSnapshot, OracleSnapshotStatus, RoundData,
-    SnapshotSource,
+    FeedSource, ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE, OracleBlockRef,
+    OracleError, OraclePrice, OracleRegistry, OracleSignalKind, OracleSnapshot,
+    OracleSnapshotStatus, RoundData, SnapshotSource,
     registry::snapshot_from_proxy_read,
     state::{EventSnapshotInput, FeedStatus},
 };
@@ -420,18 +420,38 @@ impl OracleTracker {
 
         for mut registration in registrations {
             report.checked_feeds += 1;
-            let read_proxy = registration.source.read_proxy(registration.proxy);
-            let round = registration
-                .source
-                .normalize_round(provider.latest_round_data(read_proxy).await?);
-            let new_aggregator = provider
-                .aggregator(read_proxy)
-                .await
-                .unwrap_or(registration.current_aggregator);
-            let new_layout = self
-                .registry
-                .detect_aggregator_layout(provider, new_aggregator, None)
-                .await;
+            if !registration.source.supports_proxy_reconciliation() {
+                continue;
+            }
+            let mut new_source = None;
+            let (round, new_aggregator, new_layout) = if matches!(
+                registration.source,
+                FeedSource::AaveSynchronicityPegToBase { .. }
+            ) {
+                let reconciled =
+                    reconcile_current_aave_synchronicity_peg_to_base(self, provider, &registration)
+                        .await?;
+                new_source = reconciled.new_source;
+                (
+                    reconciled.proxy_round,
+                    reconciled.new_aggregator,
+                    reconciled.new_layout,
+                )
+            } else {
+                let read_proxy = registration.source.read_proxy(registration.proxy);
+                let round = registration
+                    .source
+                    .normalize_round(provider.latest_round_data(read_proxy).await?);
+                let new_aggregator = provider
+                    .aggregator(read_proxy)
+                    .await
+                    .unwrap_or(registration.current_aggregator);
+                let new_layout = self
+                    .registry
+                    .detect_aggregator_layout(provider, new_aggregator, None)
+                    .await;
+                (round, new_aggregator, new_layout)
+            };
             let old_aggregator = registration.current_aggregator;
             let snapshot = snapshot_from_proxy_read(
                 &registration,
@@ -466,6 +486,9 @@ impl OracleTracker {
             {
                 stored.current_aggregator = new_aggregator;
                 stored.aggregator_layout = new_layout;
+                if let Some(new_source) = new_source {
+                    stored.source = new_source;
+                }
             }
             self.registry.replace_snapshot(snapshot);
             self.clear_pending_for_proxy(registration.proxy);
@@ -497,7 +520,10 @@ impl OracleTracker {
             return Ok(());
         };
 
-        if registration.current_aggregator != Some(update.aggregator) {
+        if !registration
+            .source
+            .accepts_event_from(registration.current_aggregator, update.aggregator)
+        {
             return Ok(());
         }
 
@@ -530,7 +556,10 @@ impl OracleTracker {
             return Ok(());
         };
 
-        if registration.current_aggregator != Some(update.aggregator) {
+        if !registration
+            .source
+            .accepts_event_from(registration.current_aggregator, update.aggregator)
+        {
             return Ok(());
         }
 
@@ -630,12 +659,18 @@ impl OracleTracker {
         proxy_round: RoundData,
         new_aggregator: Option<Address>,
         new_layout: Option<AggregatorLayoutEvidence>,
+        new_source: Option<FeedSource>,
+        round_is_normalized: bool,
     ) -> Result<Vec<OracleHookEvent>, OracleError> {
         let Some(registration) = self.registry.registrations_map().get(&request.id).cloned() else {
             return Err(OracleError::FeedNotFound);
         };
 
-        let proxy_round = registration.source.normalize_round(proxy_round);
+        let proxy_round = if round_is_normalized {
+            proxy_round
+        } else {
+            registration.source.normalize_round(proxy_round)
+        };
         let old_aggregator = registration.current_aggregator;
         let mut snapshot = snapshot_from_proxy_read(
             &registration,
@@ -727,6 +762,9 @@ impl OracleTracker {
         {
             stored.current_aggregator = new_aggregator;
             stored.aggregator_layout = new_layout;
+            if let Some(new_source) = new_source {
+                stored.source = new_source;
+            }
         }
         self.registry.replace_snapshot(snapshot);
         self.complete_pending_reconciliation(request);
@@ -764,26 +802,221 @@ impl OracleReconciler {
         else {
             return Err(OracleError::FeedNotFound);
         };
+        if !registration.source.supports_proxy_reconciliation() {
+            self.queue.pop_front();
+            return Ok(Some(OracleReconciliationResult {
+                request,
+                hooks: Vec::new(),
+            }));
+        }
         let block_ref = request.block_ref();
-        let read_proxy = registration.source.read_proxy(registration.proxy);
-        let proxy_round = provider.latest_round_data_at(read_proxy, block_ref).await?;
-        let new_aggregator = provider
-            .aggregator_at(read_proxy, block_ref)
-            .await
-            .unwrap_or_else(|_| {
-                tracker
-                    .current_aggregator(request.id)
-                    .or(request.aggregator)
-            });
-        let new_layout = tracker
-            .detect_aggregator_layout(provider, new_aggregator, block_ref)
-            .await;
-        let hooks =
-            tracker.apply_reconciled_request(&request, proxy_round, new_aggregator, new_layout)?;
+        let reconciled = if matches!(
+            registration.source,
+            FeedSource::AaveSynchronicityPegToBase { .. }
+        ) {
+            reconcile_aave_synchronicity_peg_to_base(
+                tracker,
+                provider,
+                &registration,
+                &request,
+                block_ref,
+            )
+            .await?
+        } else {
+            reconcile_single_proxy_source(tracker, provider, &registration, &request, block_ref)
+                .await?
+        };
+        let hooks = tracker.apply_reconciled_request(
+            &request,
+            reconciled.proxy_round,
+            reconciled.new_aggregator,
+            reconciled.new_layout,
+            reconciled.new_source,
+            reconciled.round_is_normalized,
+        )?;
         self.queue.pop_front();
 
         Ok(Some(OracleReconciliationResult { request, hooks }))
     }
+}
+
+struct ReconciledSourceRead {
+    proxy_round: RoundData,
+    new_aggregator: Option<Address>,
+    new_layout: Option<AggregatorLayoutEvidence>,
+    new_source: Option<FeedSource>,
+    round_is_normalized: bool,
+}
+
+async fn reconcile_single_proxy_source<P: ChainlinkFeedProvider>(
+    tracker: &mut OracleTracker,
+    provider: &P,
+    registration: &FeedRegistration,
+    request: &OracleReconciliationRequest,
+    block_ref: Option<OracleBlockRef>,
+) -> Result<ReconciledSourceRead, OracleError> {
+    let read_proxy = registration.source.read_proxy(registration.proxy);
+    let proxy_round = provider.latest_round_data_at(read_proxy, block_ref).await?;
+    let new_aggregator = provider
+        .aggregator_at(read_proxy, block_ref)
+        .await
+        .unwrap_or_else(|_| {
+            tracker
+                .current_aggregator(request.id)
+                .or(request.aggregator)
+        });
+    let new_layout = tracker
+        .detect_aggregator_layout(provider, new_aggregator, block_ref)
+        .await;
+    Ok(ReconciledSourceRead {
+        proxy_round,
+        new_aggregator,
+        new_layout,
+        new_source: None,
+        round_is_normalized: false,
+    })
+}
+
+async fn reconcile_aave_synchronicity_peg_to_base<P: ChainlinkFeedProvider>(
+    tracker: &mut OracleTracker,
+    provider: &P,
+    registration: &FeedRegistration,
+    request: &OracleReconciliationRequest,
+    block_ref: Option<OracleBlockRef>,
+) -> Result<ReconciledSourceRead, OracleError> {
+    let FeedSource::AaveSynchronicityPegToBase {
+        asset_to_peg_proxy,
+        asset_to_peg_aggregator,
+        peg_to_base_proxy,
+        peg_to_base_aggregator,
+        ..
+    } = registration.source.clone()
+    else {
+        unreachable!("caller checked source family")
+    };
+
+    let asset_round = provider
+        .latest_round_data_at(asset_to_peg_proxy, block_ref)
+        .await?;
+    let peg_round = provider
+        .latest_round_data_at(peg_to_base_proxy, block_ref)
+        .await?;
+    let new_asset_aggregator = provider
+        .aggregator_at(asset_to_peg_proxy, block_ref)
+        .await
+        .unwrap_or(Some(asset_to_peg_aggregator));
+    let new_peg_aggregator = provider
+        .aggregator_at(peg_to_base_proxy, block_ref)
+        .await
+        .unwrap_or(Some(peg_to_base_aggregator));
+    let changed_dependency_round = if new_peg_aggregator == request.aggregator {
+        &peg_round
+    } else {
+        &asset_round
+    };
+    let derived_answer = registration
+        .source
+        .normalize_dependency_answers(asset_round.answer, peg_round.answer)
+        .ok_or_else(|| {
+            OracleError::Provider("source is not an Aave peg-to-base synchronicity source".into())
+        })?;
+    let proxy_round = RoundData {
+        round_id: changed_dependency_round.round_id,
+        answer: derived_answer,
+        started_at: changed_dependency_round.started_at,
+        updated_at: changed_dependency_round.updated_at,
+        answered_in_round: changed_dependency_round.answered_in_round,
+    };
+    let new_source = match (new_asset_aggregator, new_peg_aggregator) {
+        (Some(asset_aggregator), Some(peg_aggregator)) => {
+            registration.source.with_synchronicity_dependency_state(
+                asset_aggregator,
+                asset_round.answer,
+                peg_aggregator,
+                peg_round.answer,
+            )
+        }
+        _ => None,
+    };
+    let new_layout = tracker
+        .detect_aggregator_layout(provider, new_asset_aggregator, block_ref)
+        .await;
+
+    Ok(ReconciledSourceRead {
+        proxy_round,
+        new_aggregator: new_asset_aggregator,
+        new_layout,
+        new_source,
+        round_is_normalized: true,
+    })
+}
+
+async fn reconcile_current_aave_synchronicity_peg_to_base<P: ChainlinkFeedProvider>(
+    tracker: &mut OracleTracker,
+    provider: &P,
+    registration: &FeedRegistration,
+) -> Result<ReconciledSourceRead, OracleError> {
+    let FeedSource::AaveSynchronicityPegToBase {
+        asset_to_peg_proxy,
+        asset_to_peg_aggregator,
+        peg_to_base_proxy,
+        peg_to_base_aggregator,
+        ..
+    } = registration.source.clone()
+    else {
+        unreachable!("caller checked source family")
+    };
+
+    let asset_round = provider.latest_round_data(asset_to_peg_proxy).await?;
+    let peg_round = provider.latest_round_data(peg_to_base_proxy).await?;
+    let new_asset_aggregator = provider
+        .aggregator(asset_to_peg_proxy)
+        .await
+        .unwrap_or(Some(asset_to_peg_aggregator));
+    let new_peg_aggregator = provider
+        .aggregator(peg_to_base_proxy)
+        .await
+        .unwrap_or(Some(peg_to_base_aggregator));
+    let representative_round = if peg_round.updated_at >= asset_round.updated_at {
+        &peg_round
+    } else {
+        &asset_round
+    };
+    let derived_answer = registration
+        .source
+        .normalize_dependency_answers(asset_round.answer, peg_round.answer)
+        .ok_or_else(|| {
+            OracleError::Provider("source is not an Aave peg-to-base synchronicity source".into())
+        })?;
+    let proxy_round = RoundData {
+        round_id: representative_round.round_id,
+        answer: derived_answer,
+        started_at: representative_round.started_at,
+        updated_at: representative_round.updated_at,
+        answered_in_round: representative_round.answered_in_round,
+    };
+    let new_source = match (new_asset_aggregator, new_peg_aggregator) {
+        (Some(asset_aggregator), Some(peg_aggregator)) => {
+            registration.source.with_synchronicity_dependency_state(
+                asset_aggregator,
+                asset_round.answer,
+                peg_aggregator,
+                peg_round.answer,
+            )
+        }
+        _ => None,
+    };
+    let new_layout = tracker
+        .detect_aggregator_layout(provider, new_asset_aggregator, None)
+        .await;
+
+    Ok(ReconciledSourceRead {
+        proxy_round,
+        new_aggregator: new_asset_aggregator,
+        new_layout,
+        new_source,
+        round_is_normalized: true,
+    })
 }
 
 impl OracleTracker {
