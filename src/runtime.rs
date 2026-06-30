@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -7,14 +8,18 @@ use alloy_network::{Ethereum, Network};
 use alloy_primitives::Address;
 use evm_fork_cache::{
     cache::EvmCache,
-    reactive::{EventSubscriber, ReactiveBatchReport, ReactiveConfig, ReactiveRuntime},
+    reactive::{
+        EventSubscriber, ReactiveBatchReport, ReactiveConfig, ReactiveHandler, ReactiveInterest,
+        ReactiveRuntime,
+    },
 };
 
 use crate::{
-    ChainlinkFeedProvider, FeedConfig, FeedId, OracleError, OracleHookEvent, OraclePrice,
-    OraclePriceCorrected, OraclePriceUpdate, OracleReactiveHandler, OracleReadOverlay,
-    OracleReconciler, OracleRegistry, OracleSignal, OracleStorageAdapter, OracleStorageSync,
-    OracleTracker, RoundData, StalenessPolicy,
+    ChainlinkFeedProvider, FeedConfig, FeedId, OracleAdapterFeedSkip, OracleAdapterPlugin,
+    OracleDiscoveryContext, OracleError, OracleHookEvent, OraclePrice, OraclePriceCorrected,
+    OraclePriceUpdate, OracleReactiveHandler, OracleReadOverlay, OracleReconciler, OracleRegistry,
+    OracleSignal, OracleStorageAdapter, OracleStorageSync, OracleTracker, RoundData,
+    StalenessPolicy,
 };
 
 type OracleEventCallback = Arc<dyn Fn(&OracleHookEvent) + Send + Sync>;
@@ -103,6 +108,23 @@ pub struct OracleRuntimeBuilder<P> {
     now_timestamp: Option<u64>,
     storage_sync: OracleStorageSync,
     callbacks: Vec<OracleEventCallback>,
+}
+
+/// Cache-native runtime builder with first-class oracle adapter plugins.
+pub struct OracleCacheRuntimeBuilder {
+    adapters: Vec<Arc<dyn OracleAdapterPlugin>>,
+    now_timestamp: Option<u64>,
+    storage_sync: OracleStorageSync,
+    callbacks: Vec<OracleEventCallback>,
+}
+
+/// Best-effort cache-native oracle runtime build report.
+#[derive(Debug)]
+pub struct OracleCacheRuntimeBuildReport {
+    /// Runtime seeded with every successfully discovered feed.
+    pub runtime: OracleRuntime<()>,
+    /// Feeds that were skipped because an adapter could not register them.
+    pub skipped: Vec<OracleAdapterFeedSkip>,
 }
 
 impl<P> OracleRuntimeBuilder<P> {
@@ -200,6 +222,139 @@ impl<P: ChainlinkFeedProvider> OracleRuntimeBuilder<P> {
             tracker: OracleTracker::new(registry),
             storage_sync: self.storage_sync,
             callbacks: self.callbacks,
+            adapter_handlers: Vec::new(),
+        })
+    }
+}
+
+impl Default for OracleCacheRuntimeBuilder {
+    fn default() -> Self {
+        Self {
+            adapters: Vec::new(),
+            now_timestamp: None,
+            storage_sync: OracleStorageSync::chainlink_defaults(),
+            callbacks: Vec::new(),
+        }
+    }
+}
+
+impl OracleCacheRuntimeBuilder {
+    /// Install one oracle adapter plugin.
+    pub fn install_adapter<A>(mut self, adapter: A) -> Self
+    where
+        A: OracleAdapterPlugin + 'static,
+    {
+        self.adapters.push(Arc::new(adapter));
+        self
+    }
+
+    /// Set a fixed timestamp for deterministic registration status classification.
+    pub fn now_timestamp(mut self, now_timestamp: u64) -> Self {
+        self.now_timestamp = Some(now_timestamp);
+        self
+    }
+
+    /// Add one storage adapter.
+    pub fn storage_adapter<A>(mut self, adapter: A) -> Self
+    where
+        A: OracleStorageAdapter + 'static,
+    {
+        self.storage_sync.push_adapter(Arc::new(adapter));
+        self
+    }
+
+    /// Replace the storage-sync registry.
+    pub fn storage_sync(mut self, storage_sync: OracleStorageSync) -> Self {
+        self.storage_sync = storage_sync;
+        self
+    }
+
+    /// Subscribe to every typed oracle event emitted by this runtime.
+    pub fn on_event<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&OracleHookEvent) + Send + Sync + 'static,
+    {
+        self.callbacks.push(Arc::new(callback));
+        self
+    }
+
+    /// Subscribe to immediate event-derived price updates.
+    pub fn on_price_update<F>(self, callback: F) -> Self
+    where
+        F: Fn(&OraclePriceUpdate) + Send + Sync + 'static,
+    {
+        self.on_event(move |event| {
+            if let OracleHookEvent::PriceUpdate(update) = event {
+                callback(update);
+            }
+        })
+    }
+
+    /// Register adapter-discovered feeds and construct the runtime.
+    pub async fn build(self, cache: &mut EvmCache) -> Result<OracleRuntime<()>, OracleError> {
+        let report = self.build_report(cache).await?;
+        if let Some(skipped) = report.skipped.first() {
+            return Err(cache_runtime_skip_error(skipped));
+        }
+        Ok(report.runtime)
+    }
+
+    /// Register every compatible adapter feed and return skipped feeds instead of failing fast.
+    pub async fn build_report(
+        self,
+        cache: &mut EvmCache,
+    ) -> Result<OracleCacheRuntimeBuildReport, OracleError> {
+        let now_timestamp = match self.now_timestamp {
+            Some(now_timestamp) => now_timestamp,
+            None => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| OracleError::Provider(error.to_string()))?
+                .as_secs(),
+        };
+
+        let mut discovered_by_adapter = Vec::new();
+        let mut seeded = Vec::new();
+        let mut skipped = Vec::new();
+        for adapter in &self.adapters {
+            let report = adapter
+                .discover(OracleDiscoveryContext {
+                    cache,
+                    now_timestamp,
+                })
+                .await?;
+            skipped.extend(report.skipped);
+            let registrations = report
+                .feeds
+                .iter()
+                .map(|feed| feed.registration.clone())
+                .collect::<Vec<_>>();
+            seeded.extend(
+                report
+                    .feeds
+                    .into_iter()
+                    .map(|feed| (feed.registration, feed.round)),
+            );
+            discovered_by_adapter.push((Arc::clone(adapter), registrations));
+        }
+
+        let tracker = OracleTracker::from_registrations_at_timestamp(seeded, now_timestamp)?;
+        let adapter_handlers = discovered_by_adapter
+            .into_iter()
+            .filter(|(_, registrations)| !registrations.is_empty())
+            .map(|(adapter, registrations)| {
+                adapter.reactive_handler(registrations, self.storage_sync.clone())
+            })
+            .collect();
+
+        Ok(OracleCacheRuntimeBuildReport {
+            runtime: OracleRuntime {
+                provider: (),
+                tracker,
+                storage_sync: self.storage_sync,
+                callbacks: self.callbacks,
+                adapter_handlers,
+            },
+            skipped,
         })
     }
 }
@@ -210,6 +365,19 @@ pub struct OracleRuntime<P> {
     tracker: OracleTracker,
     storage_sync: OracleStorageSync,
     callbacks: Vec<OracleEventCallback>,
+    adapter_handlers: Vec<Arc<dyn ReactiveHandler<Ethereum>>>,
+}
+
+impl<P: fmt::Debug> fmt::Debug for OracleRuntime<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OracleRuntime")
+            .field("provider", &self.provider)
+            .field("tracker", &self.tracker)
+            .field("storage_sync", &self.storage_sync)
+            .field("callbacks_len", &self.callbacks.len())
+            .field("adapter_handlers_len", &self.adapter_handlers.len())
+            .finish()
+    }
 }
 
 impl<P> OracleRuntime<P> {
@@ -247,6 +415,11 @@ impl<P> OracleRuntime<P> {
         runtime
             .register_handler(Arc::new(self.reactive_handler()))
             .map_err(runtime_error)?;
+        for handler in &self.adapter_handlers {
+            runtime
+                .register_handler(Arc::clone(handler))
+                .map_err(runtime_error)?;
+        }
         Ok(runtime)
     }
 
@@ -256,7 +429,7 @@ impl<P> OracleRuntime<P> {
         S: EventSubscriber<Ethereum>,
     {
         subscriber
-            .register_interests(&self.reactive_handler().interests())
+            .register_interests(&self.reactive_interests())
             .map_err(runtime_error)
     }
 
@@ -346,9 +519,22 @@ impl<P> OracleRuntime<P> {
             }
         }
     }
+
+    fn reactive_interests(&self) -> Vec<ReactiveInterest<Ethereum>> {
+        let mut interests = self.reactive_handler().interests();
+        for handler in &self.adapter_handlers {
+            interests.extend(handler.interests());
+        }
+        interests
+    }
 }
 
 impl OracleRuntime<()> {
+    /// Start building a cache-native runtime from oracle adapter plugins.
+    pub fn cache_builder() -> OracleCacheRuntimeBuilder {
+        OracleCacheRuntimeBuilder::default()
+    }
+
     /// Build a runtime facade from a cache-native tracker.
     pub fn from_tracker(tracker: OracleTracker) -> Self {
         Self {
@@ -356,10 +542,24 @@ impl OracleRuntime<()> {
             tracker,
             storage_sync: OracleStorageSync::chainlink_defaults(),
             callbacks: Vec::new(),
+            adapter_handlers: Vec::new(),
         }
     }
 }
 
 fn runtime_error(error: impl ToString) -> OracleError {
     OracleError::Provider(error.to_string())
+}
+
+fn cache_runtime_skip_error(skipped: &OracleAdapterFeedSkip) -> OracleError {
+    let label = skipped
+        .feed
+        .label()
+        .map(str::to_string)
+        .or_else(|| skipped.feed.id().map(|id| id.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+    OracleError::Provider(format!(
+        "adapter feed {} at {:?} was skipped: {}",
+        label, skipped.proxy, skipped.reason
+    ))
 }

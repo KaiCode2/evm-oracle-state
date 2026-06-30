@@ -193,6 +193,75 @@ let tracker = AaveV3OracleAdapter::new(aave_oracle)
     .await?;
 ```
 
+## Oracle Adapter Plugins
+
+Oracle families that are not plain Chainlink proxies can plug into the same
+runtime by implementing `OracleAdapterPlugin`. Discovery receives a mutable
+`EvmCache`, returns seeded `FeedRegistration` plus `RoundData` pairs, and the
+adapter provides the `evm-fork-cache` reactive handler that owns its event
+routing.
+
+```rust
+use std::sync::Arc;
+
+use alloy_network::Ethereum;
+use evm_fork_cache::reactive::ReactiveHandler;
+use evm_oracle_state::{
+    AdapterFuture, FeedRegistration, OracleAdapterId, OracleAdapterPlugin,
+    OracleDiscoveredFeed, OracleDiscoveryContext, OracleDiscoveryReport,
+    OracleRuntime, OracleStorageSync,
+};
+
+struct MyOracleAdapter;
+
+impl OracleAdapterPlugin for MyOracleAdapter {
+    fn adapter_id(&self) -> OracleAdapterId {
+        OracleAdapterId::new("my-oracle")
+    }
+
+    fn discover<'a>(
+        &'a self,
+        ctx: OracleDiscoveryContext<'a>,
+    ) -> AdapterFuture<'a, OracleDiscoveryReport> {
+        Box::pin(async move {
+            // Use ctx.cache for all chain reads, then seed typed state.
+            Ok(OracleDiscoveryReport {
+                feeds: vec![OracleDiscoveredFeed {
+                    registration,
+                    round,
+                }],
+                skipped: Vec::new(),
+            })
+        })
+    }
+
+    fn reactive_handler(
+        &self,
+        registrations: Vec<FeedRegistration>,
+        storage_sync: OracleStorageSync,
+    ) -> Arc<dyn ReactiveHandler<Ethereum>> {
+        Arc::new(MyOracleReactiveHandler::new(registrations, storage_sync))
+    }
+}
+
+let mut oracle = OracleRuntime::cache_builder()
+    .install_adapter(MyOracleAdapter)
+    .build(&mut cache)
+    .await?;
+```
+
+Use `build_report(&mut cache).await?` for best-effort startup when adapter
+skips should be inspected without failing the whole runtime. The stricter
+`build(&mut cache).await?` path fails fast when any adapter reports a skipped
+feed, including the feed id or label, proxy, and skip reason in the error.
+
+Custom handlers should emit standard `OraclePriceUpdate` hook payloads in the
+`evm-oracle-state` namespace. `OracleRuntime::apply_batch_report` will then
+update `OracleTracker` state exactly like built-in Chainlink events. The
+`FeedSource::custom(OracleSourceDescriptor { ... })` descriptor keeps custom
+sources out of the built-in Chainlink handler while preserving common price,
+overlay, and hook APIs.
+
 ## Limitations
 
 - No durable database or indexer.

@@ -44,6 +44,9 @@ impl OracleReactiveHandler {
         let mut registrations_by_aggregator: BTreeMap<Address, Vec<FeedRegistration>> =
             BTreeMap::new();
         for registration in registrations {
+            if !registration.source.uses_builtin_chainlink_handler() {
+                continue;
+            }
             if let Some(aggregator) = registration.current_aggregator {
                 registrations_by_aggregator
                     .entry(aggregator)

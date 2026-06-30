@@ -6,6 +6,7 @@
 
 #[cfg(feature = "aave")]
 mod aave;
+mod adapter;
 mod cache_reader;
 mod config;
 mod error;
@@ -26,6 +27,11 @@ mod types;
 
 #[cfg(feature = "aave")]
 pub use aave::{AaveAsset, AaveV3OracleAdapter};
+pub use adapter::{
+    AdapterFuture, OracleAdapterId, OracleAdapterPlugin, OracleDiscoveredFeed,
+    OracleDiscoveryContext, OracleDiscoveryReport, OracleSourceDescriptor,
+    OracleTransformDescriptor,
+};
 pub use cache_reader::{
     EvmCacheChainlinkReader, OracleAdapter, OracleAdapterBuildReport, OracleAdapterBuilder,
     OracleAdapterFeedSkip, OracleAdapterSkipReason,
@@ -47,7 +53,10 @@ pub use price::{CheckedPrice, OraclePrice, PricePolicy};
 pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
 pub use reactive::OracleReactiveHandler;
 pub use registry::{AggregatorChange, FeedId, FeedRegistration, FeedSource, OracleRegistry};
-pub use runtime::{ChainlinkFeed, OracleRuntime, OracleRuntimeBuilder};
+pub use runtime::{
+    ChainlinkFeed, OracleCacheRuntimeBuildReport, OracleCacheRuntimeBuilder, OracleRuntime,
+    OracleRuntimeBuilder,
+};
 pub use signal::{
     ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE, OracleSignal, OracleSignalKind,
 };

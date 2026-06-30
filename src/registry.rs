@@ -4,8 +4,8 @@ use alloy_primitives::{Address, B256, I256, U256};
 
 use crate::{
     AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence, ChainlinkFeedProvider,
-    FeedConfig, FeedMetadata, OracleBlockRef, OracleError, OracleSnapshot, RoundData,
-    classify_type_and_version,
+    FeedConfig, FeedMetadata, OracleBlockRef, OracleError, OracleSnapshot, OracleSourceDescriptor,
+    OracleTransformDescriptor, RoundData, classify_type_and_version,
 };
 
 /// Stable id for a registered feed.
@@ -45,6 +45,8 @@ pub enum FeedSource {
         /// Maximum answer exposed by the Aave adapter.
         price_cap: I256,
     },
+    /// Adapter-owned oracle source.
+    Custom(OracleSourceDescriptor),
 }
 
 impl FeedSource {
@@ -61,9 +63,19 @@ impl FeedSource {
         }
     }
 
+    /// Construct an adapter-owned custom source.
+    pub fn custom(descriptor: OracleSourceDescriptor) -> Self {
+        Self::Custom(descriptor)
+    }
+
     /// Return true when this source is a plain identity Chainlink source.
     pub fn is_identity(&self) -> bool {
         matches!(self, Self::Chainlink)
+    }
+
+    /// Return true when the built-in Chainlink reactive handler should route this source.
+    pub fn uses_builtin_chainlink_handler(&self) -> bool {
+        matches!(self, Self::Chainlink | Self::AavePriceCapStable { .. })
     }
 
     /// Proxy that should be read for authoritative Chainlink round data.
@@ -73,6 +85,7 @@ impl FeedSource {
             Self::AavePriceCapStable {
                 underlying_proxy, ..
             } => *underlying_proxy,
+            Self::Custom(descriptor) => descriptor.read_proxy,
         }
     }
 
@@ -82,6 +95,13 @@ impl FeedSource {
             Self::Chainlink => answer,
             Self::AavePriceCapStable { price_cap, .. } if answer > *price_cap => *price_cap,
             Self::AavePriceCapStable { .. } => answer,
+            Self::Custom(descriptor) => match &descriptor.transform {
+                OracleTransformDescriptor::Identity | OracleTransformDescriptor::Custom { .. } => {
+                    answer
+                }
+                OracleTransformDescriptor::PriceCap { cap } if answer > *cap => *cap,
+                OracleTransformDescriptor::PriceCap { .. } => answer,
+            },
         }
     }
 
