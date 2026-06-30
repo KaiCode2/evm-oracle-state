@@ -1,0 +1,47 @@
+[package]
+name = "evm-oracle-state"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "EVM-backed Chainlink-style oracle state tracking over evm-fork-cache"
+keywords = ["evm", "oracle", "chainlink", "defi"]
+categories = ["cryptography::cryptocurrencies", "simulation", "caching"]
+readme = "README.md"
+repository = "https://github.com/KaiCode2/evm-oracle-state"
+documentation = "https://docs.rs/evm-oracle-state"
+
+# Standalone workspace root: keeps this crate from being absorbed by any
+# ancestor-directory workspace and gives it its own Cargo.lock.
+[workspace]
+
+[features]
+default = ["chainlink", "reactive"]
+chainlink = []
+reactive = []
+aave = []
+live-tests = ["alloy-provider/ws"]
+
+[dependencies]
+# INTERIM: use the sibling checkout while evm-fork-cache's live AlloySubscriber
+# work and cold-start updates are not available from one published/git-pinned
+# release.
+evm-fork-cache = { path = "../evm-fork-cache", version = "0.1" }
+
+alloy-eips = "1.0.38"
+alloy-network = "1.0.38"
+alloy-primitives = { version = "1.4", features = ["map"] }
+alloy-provider = "1.0.38"
+alloy-rpc-types-eth = "1.0.38"
+alloy-sol-types = "1.4"
+
+thiserror = "2.0"
+tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+tracing = "0.1.41"
+
+[dev-dependencies]
+alloy-provider = { version = "1.0.38", features = ["ws"] }
+alloy-rpc-client = "1.0.38"
+alloy-transport = "1.0.38"
+revm = "34.0.0"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
