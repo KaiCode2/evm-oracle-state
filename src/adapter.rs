@@ -32,9 +32,11 @@ impl std::fmt::Display for OracleAdapterId {
 }
 
 /// Open transform descriptor for non-Chainlink-native source adapters.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum OracleTransformDescriptor {
     /// Event/read answers are already in the feed's user-facing denomination.
+    #[default]
     Identity,
     /// Clamp answers above a configured cap.
     PriceCap {
@@ -52,13 +54,8 @@ pub enum OracleTransformDescriptor {
     },
 }
 
-impl Default for OracleTransformDescriptor {
-    fn default() -> Self {
-        Self::Identity
-    }
-}
-
 /// Open descriptor for an adapter-owned oracle source.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OracleSourceDescriptor {
     /// Adapter that owns source-specific semantics.
@@ -77,7 +74,47 @@ pub struct OracleSourceDescriptor {
     pub metadata: BTreeMap<String, String>,
 }
 
+impl OracleSourceDescriptor {
+    /// Create a custom source descriptor with identity answer transform and no metadata.
+    pub fn new(
+        adapter_id: OracleAdapterId,
+        source_kind: impl Into<Cow<'static, str>>,
+        user_facing_proxy: Address,
+        read_proxy: Address,
+        event_source: Address,
+    ) -> Self {
+        Self {
+            adapter_id,
+            source_kind: source_kind.into(),
+            user_facing_proxy,
+            read_proxy,
+            event_source,
+            transform: OracleTransformDescriptor::Identity,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Set the source transform descriptor.
+    pub fn transform(mut self, transform: OracleTransformDescriptor) -> Self {
+        self.transform = transform;
+        self
+    }
+
+    /// Replace all adapter-owned source metadata.
+    pub fn metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Add one adapter-owned metadata entry.
+    pub fn metadata_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+}
+
 /// One feed discovered and seeded by an oracle adapter plugin.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct OracleDiscoveredFeed {
     /// Registration inserted into the oracle tracker.
@@ -86,13 +123,43 @@ pub struct OracleDiscoveredFeed {
     pub round: RoundData,
 }
 
+impl OracleDiscoveredFeed {
+    /// Create a discovered feed from a registration and initial round.
+    pub fn new(registration: FeedRegistration, round: RoundData) -> Self {
+        Self {
+            registration,
+            round,
+        }
+    }
+}
+
 /// Result of adapter discovery.
+#[non_exhaustive]
 #[derive(Clone, Debug, Default)]
 pub struct OracleDiscoveryReport {
     /// Feeds that were registered successfully.
     pub feeds: Vec<OracleDiscoveredFeed>,
     /// Optional feed skips reported by best-effort adapters.
     pub skipped: Vec<OracleAdapterFeedSkip>,
+}
+
+impl OracleDiscoveryReport {
+    /// Create an empty discovery report.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one discovered feed to this report.
+    pub fn with_feed(mut self, feed: OracleDiscoveredFeed) -> Self {
+        self.feeds.push(feed);
+        self
+    }
+
+    /// Add one skipped feed to this report.
+    pub fn with_skip(mut self, skip: OracleAdapterFeedSkip) -> Self {
+        self.skipped.push(skip);
+        self
+    }
 }
 
 /// Cache-native discovery context passed to oracle adapter plugins.

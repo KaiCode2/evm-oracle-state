@@ -29,6 +29,7 @@ pub struct RoundData {
 }
 
 /// Classified usability of a feed snapshot.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedStatus {
     /// Snapshot is usable under its configured policy.
@@ -49,6 +50,7 @@ pub enum FeedStatus {
 }
 
 /// Lifecycle confidence for an oracle snapshot.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OracleSnapshotStatus {
     /// Snapshot was derived from an event and still needs proxy reconciliation.
@@ -66,6 +68,7 @@ pub enum OracleSnapshotStatus {
 }
 
 /// Source that produced an oracle snapshot.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotSource {
     /// Snapshot came from an authoritative proxy read.

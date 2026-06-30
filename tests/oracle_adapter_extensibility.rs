@@ -45,15 +45,14 @@ impl CustomOracleAdapter {
     }
 
     fn registration(&self) -> FeedRegistration {
-        let source = OracleSourceDescriptor {
-            adapter_id: self.id.clone(),
-            source_kind: Cow::Borrowed("test-source"),
-            user_facing_proxy: self.proxy,
-            read_proxy: self.proxy,
-            event_source: self.event_source,
-            transform: OracleTransformDescriptor::Identity,
-            metadata: Default::default(),
-        };
+        let source = OracleSourceDescriptor::new(
+            self.id.clone(),
+            Cow::Borrowed("test-source"),
+            self.proxy,
+            self.proxy,
+            self.event_source,
+        )
+        .transform(OracleTransformDescriptor::Identity);
 
         FeedRegistration {
             id: FeedId::new("custom-usd"),
@@ -80,13 +79,12 @@ impl OracleAdapterPlugin for CustomOracleAdapter {
         _ctx: OracleDiscoveryContext<'a>,
     ) -> AdapterFuture<'a, OracleDiscoveryReport> {
         Box::pin(async move {
-            Ok(OracleDiscoveryReport {
-                feeds: vec![OracleDiscoveredFeed {
-                    registration: self.registration(),
-                    round: round(1, self.initial_answer, 1_700_000_000),
-                }],
-                skipped: Vec::new(),
-            })
+            Ok(
+                OracleDiscoveryReport::new().with_feed(OracleDiscoveredFeed::new(
+                    self.registration(),
+                    round(1, self.initial_answer, 1_700_000_000),
+                )),
+            )
         })
     }
 
@@ -127,16 +125,15 @@ impl OracleAdapterPlugin for SkippingOracleAdapter {
         _ctx: OracleDiscoveryContext<'a>,
     ) -> AdapterFuture<'a, OracleDiscoveryReport> {
         Box::pin(async move {
-            Ok(OracleDiscoveryReport {
-                feeds: Vec::new(),
-                skipped: vec![OracleAdapterFeedSkip {
+            Ok(
+                OracleDiscoveryReport::new().with_skip(OracleAdapterFeedSkip {
                     feed: Feed::proxy(self.proxy).id("skipped-custom").build(),
                     proxy: self.proxy,
                     reason: OracleAdapterSkipReason::NotChainlinkCompatible {
                         error: "synthetic unsupported oracle".to_string(),
                     },
-                }],
-            })
+                }),
+            )
         })
     }
 
@@ -259,6 +256,11 @@ async fn external_adapter_discovers_feed_and_installs_custom_reactive_handler() 
     let reactive = runtime
         .reactive_runtime()
         .expect("external adapter handler should install");
+    assert_eq!(
+        runtime.reactive_handlers().len(),
+        2,
+        "runtime should expose built-in plus adapter handlers"
+    );
     let matching_log = rpc_log(event_source, vec![CUSTOM_TOPIC], Vec::new(), 101, 0);
     assert!(reactive.interests().iter().any(|interest| match interest {
         ReactiveInterest::Logs(interest) => interest.matches(&matching_log),

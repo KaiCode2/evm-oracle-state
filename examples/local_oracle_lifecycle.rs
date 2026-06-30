@@ -307,6 +307,7 @@ fn print_hook(label: &str, event: &OracleHookEvent) {
             change.old,
             change.new
         ),
+        event => println!("{label}: kind={}", event.kind_str()),
     }
 }
 

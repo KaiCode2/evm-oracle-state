@@ -222,18 +222,18 @@ impl AaveV3OracleAdapter {
 
         let feed = asset.feed_for_source(source);
         match reader.register_feed(registry, feed.clone()).await {
-            Ok(_) => return Ok(None),
+            Ok(_) => Ok(None),
             Err(OracleError::Provider(chainlink_error)) => {
-                return Self::try_register_price_cap_stable(
+                Self::try_register_price_cap_stable(
                     reader,
                     registry,
                     asset,
                     source,
                     chainlink_error,
                 )
-                .await;
+                .await
             }
-            Err(error) => return Err(error),
+            Err(error) => Err(error),
         }
     }
 

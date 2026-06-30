@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 /// Errors returned by Chainlink event decoding.
+#[non_exhaustive]
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ChainlinkEventDecodeError {
     /// The log did not contain the expected event signature topic.
@@ -46,6 +47,7 @@ pub enum ChainlinkEventDecodeError {
 }
 
 /// Errors returned by registry, reconciliation, and report application.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum OracleError {
     /// Provider read failed.
@@ -69,6 +71,7 @@ pub enum OracleError {
 }
 
 /// Errors returned when decoding oracle hook signals.
+#[non_exhaustive]
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum OracleSignalDecodeError {
     /// The signal kind is known but the payload is absent.

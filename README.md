@@ -74,6 +74,15 @@ aggregator changes, and post-reorg safety still use
 - Treat removed event state conservatively by marking event-derived snapshots
   unknown and requiring reconciliation.
 
+## Feature Flags
+
+Core Chainlink-compatible registration, reactive handling, reconciliation,
+overlay reads, and direct OCR1/OCR2 storage sync are always compiled. Optional
+features currently add focused surfaces:
+
+- `aave`: enables `AaveV3OracleAdapter` and `AaveAsset` discovery helpers.
+- `live-tests`: enables websocket dependencies used by RPC-gated live tests.
+
 ## Event to Simulation Flow
 
 ```text
@@ -225,13 +234,9 @@ impl OracleAdapterPlugin for MyOracleAdapter {
     ) -> AdapterFuture<'a, OracleDiscoveryReport> {
         Box::pin(async move {
             // Use ctx.cache for all chain reads, then seed typed state.
-            Ok(OracleDiscoveryReport {
-                feeds: vec![OracleDiscoveredFeed {
-                    registration,
-                    round,
-                }],
-                skipped: Vec::new(),
-            })
+            Ok(OracleDiscoveryReport::new().with_feed(
+                OracleDiscoveredFeed::new(registration, round),
+            ))
         })
     }
 
@@ -258,9 +263,15 @@ feed, including the feed id or label, proxy, and skip reason in the error.
 Custom handlers should emit standard `OraclePriceUpdate` hook payloads in the
 `evm-oracle-state` namespace. `OracleRuntime::apply_batch_report` will then
 update `OracleTracker` state exactly like built-in Chainlink events. The
-`FeedSource::custom(OracleSourceDescriptor { ... })` descriptor keeps custom
-sources out of the built-in Chainlink handler while preserving common price,
-overlay, and hook APIs.
+`FeedSource::custom(OracleSourceDescriptor::new(...))` keeps custom sources out
+of the built-in Chainlink handler while preserving common price, overlay, and
+hook APIs.
+
+When a runtime is built with adapter plugins, prefer
+`OracleRuntime::reactive_runtime()`, `register_subscriber(...)`,
+`reactive_handlers()`, or `reactive_interests()` so built-in and adapter-owned
+handlers are wired together. `reactive_handler()` intentionally returns only the
+built-in Chainlink-compatible handler.
 
 ## Limitations
 
@@ -287,7 +298,8 @@ cargo run --example local_oracle_lifecycle
 cargo run --example chainlink_storage_sync_demo
 ```
 
-`local_oracle_lifecycle` walks through the core runtime flow:
+`local_oracle_lifecycle` is the compile-checked quickstart. It walks through the
+core runtime flow with a deterministic mock provider and synthetic event:
 
 ```text
 mock proxy read

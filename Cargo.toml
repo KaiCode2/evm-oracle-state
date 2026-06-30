@@ -11,14 +11,15 @@ readme = "README.md"
 repository = "https://github.com/KaiCode2/evm-oracle-state"
 documentation = "https://docs.rs/evm-oracle-state"
 
+# Keep local runtime state and editor/CI artifacts out of published packages.
+exclude = [".env", ".env.*", "target/", ".github/"]
+
 # Standalone workspace root: keeps this crate from being absorbed by any
 # ancestor-directory workspace and gives it its own Cargo.lock.
 [workspace]
 
 [features]
-default = ["chainlink", "reactive"]
-chainlink = []
-reactive = []
+default = []
 aave = []
 live-tests = ["alloy-provider/ws"]
 

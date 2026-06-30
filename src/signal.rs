@@ -12,6 +12,7 @@ pub const ORACLE_SIGNAL_NAMESPACE: &str = "evm-oracle-state";
 pub const ORACLE_LEGACY_ANSWER_UPDATED_KIND: &str = "oracle.answer_updated";
 
 /// Strongly typed oracle hook signal kind.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum OracleSignalKind {
     /// Immediate event-derived price update.
@@ -52,6 +53,7 @@ impl OracleSignalKind {
 }
 
 /// Borrowed typed view over an oracle hook signal payload.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OracleSignal<'a> {
     /// Immediate event-derived price update.

@@ -31,6 +31,7 @@ impl std::fmt::Display for FeedId {
 }
 
 /// Network source and transform for a registered feed.
+#[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum FeedSource {
     /// Plain Chainlink-compatible proxy with identity answer transform.
@@ -150,6 +151,15 @@ pub struct AggregatorChange {
     pub new: Option<Address>,
 }
 
+struct PreparedFeed {
+    id: FeedId,
+    config: FeedConfig,
+    source: FeedSource,
+    metadata: FeedMetadata,
+    round: RoundData,
+    current_aggregator: Option<Address>,
+}
+
 /// Registry plus latest proxy-read snapshots.
 #[derive(Clone, Debug)]
 pub struct OracleRegistry {
@@ -190,12 +200,14 @@ impl OracleRegistry {
         let current_aggregator = provider.aggregator(read_proxy).await.unwrap_or(None);
         self.insert_prepared_feed(
             provider,
-            id,
-            config,
-            source,
-            metadata,
-            round,
-            current_aggregator,
+            PreparedFeed {
+                id,
+                config,
+                source,
+                metadata,
+                round,
+                current_aggregator,
+            },
         )
         .await
     }
@@ -213,12 +225,14 @@ impl OracleRegistry {
         let id = self.prepare_feed_id(&config)?;
         self.insert_prepared_feed(
             provider,
-            id,
-            config,
-            source,
-            metadata,
-            round,
-            current_aggregator,
+            PreparedFeed {
+                id,
+                config,
+                source,
+                metadata,
+                round,
+                current_aggregator,
+            },
         )
         .await
     }
@@ -226,13 +240,16 @@ impl OracleRegistry {
     async fn insert_prepared_feed<P: ChainlinkFeedProvider>(
         &mut self,
         provider: &P,
-        id: FeedId,
-        config: FeedConfig,
-        source: FeedSource,
-        metadata: FeedMetadata,
-        round: RoundData,
-        current_aggregator: Option<Address>,
+        prepared: PreparedFeed,
     ) -> Result<FeedId, OracleError> {
+        let PreparedFeed {
+            id,
+            config,
+            source,
+            metadata,
+            round,
+            current_aggregator,
+        } = prepared;
         let aggregator_layout = self
             .detect_aggregator_layout(provider, current_aggregator, None)
             .await;

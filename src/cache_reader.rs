@@ -261,6 +261,7 @@ pub struct OracleAdapterBuilder {
 }
 
 /// Best-effort cache-native oracle registration report.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct OracleAdapterBuildReport {
     /// Tracker containing every successfully registered feed.
@@ -281,6 +282,7 @@ pub struct OracleAdapterFeedSkip {
 }
 
 /// Classified reason for skipping a feed in best-effort registration.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OracleAdapterSkipReason {
     /// The source did not expose the Chainlink proxy methods required by this crate.

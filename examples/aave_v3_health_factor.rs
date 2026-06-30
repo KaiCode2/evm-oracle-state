@@ -166,7 +166,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "\nDeBank check: node /Users/kaialdag/Desktop/dev/egg/debank-portfolio-cli/bin/debank-portfolio.js {user:?} --protocol aave --format json"
     );
 
-    if oracle_runtime.reactive_handler().interests().is_empty() {
+    if oracle_runtime.reactive_interests().is_empty() {
         println!(
             "\nReactive tracking disabled: no Chainlink-compatible Aave oracle sources registered."
         );
@@ -179,12 +179,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             &mut cache,
             &mut oracle_runtime,
             &mut reactive_runtime,
-            pool,
-            oracle,
-            user,
-            user_config,
-            emode.as_ref(),
-            base_decimals,
+            HealthContext {
+                pool,
+                oracle,
+                user,
+                user_config,
+                emode: emode.as_ref(),
+                base_decimals,
+            },
         )
         .await?;
     } else {
@@ -409,12 +411,7 @@ async fn run_reactive_tracking(
     cache: &mut EvmCache,
     oracle_runtime: &mut OracleRuntime<()>,
     reactive_runtime: &mut ReactiveRuntime<Ethereum>,
-    pool: Address,
-    oracle: Address,
-    user: Address,
-    user_config: U256,
-    emode: Option<&EModeConfig>,
-    base_decimals: u8,
+    health: HealthContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let duration = env_u64("AAVE_DEMO_DURATION_SECS").unwrap_or(600);
     let timeout_secs = env_u64("AAVE_DEMO_IDLE_TIMEOUT_SECS").unwrap_or(30);
@@ -422,7 +419,7 @@ async fn run_reactive_tracking(
     println!("\nReactive oracle tracking");
     println!(
         "registered interests: {} duration={}s idle_timeout={}s",
-        oracle_runtime.reactive_handler().interests().len(),
+        oracle_runtime.reactive_interests().len(),
         duration,
         timeout_secs
     );
@@ -475,17 +472,7 @@ async fn run_reactive_tracking(
         println!("subscription_batch events={}", events.len());
         live_hooks += events.len();
         for event in events {
-            print_reactive_health(
-                cache,
-                pool,
-                oracle,
-                user,
-                user_config,
-                emode,
-                base_decimals,
-                "live_event",
-                event,
-            )?;
+            print_reactive_health(cache, &health, "live_event", event)?;
         }
     }
 
@@ -500,31 +487,43 @@ async fn run_reactive_tracking(
     Ok(())
 }
 
-fn print_reactive_health(
-    cache: &mut EvmCache,
+#[derive(Clone, Copy)]
+struct HealthContext<'a> {
     pool: Address,
     oracle: Address,
     user: Address,
     user_config: U256,
-    emode: Option<&EModeConfig>,
+    emode: Option<&'a EModeConfig>,
     base_decimals: u8,
+}
+
+fn print_reactive_health(
+    cache: &mut EvmCache,
+    health: &HealthContext<'_>,
     prefix: &str,
     event: OracleHookEvent,
 ) -> Result<(), OracleError> {
     let OracleHookEvent::PriceUpdate(update) = event else {
         return Ok(());
     };
-    let positions = read_positions(cache, pool, oracle, user, user_config, emode)?;
+    let positions = read_positions(
+        cache,
+        health.pool,
+        health.oracle,
+        health.user,
+        health.user_config,
+        health.emode,
+    )?;
     let computed = compute_health_factor(&positions);
-    let protocol = read_protocol_account_data(cache, pool, user)?;
+    let protocol = read_protocol_account_data(cache, health.pool, health.user)?;
     print_price_update(&update, prefix);
     println!(
         "{prefix} health_factor computed={} aave_getUserAccountData={} delta={} collateral={} debt={}",
         format_wad(computed.health_factor_wad),
         format_wad(protocol.health_factor),
         format_hf_delta(computed.health_factor_wad, protocol.health_factor),
-        format_units(computed.total_collateral_base, base_decimals, 6),
-        format_units(computed.total_debt_base, base_decimals, 6)
+        format_units(computed.total_collateral_base, health.base_decimals, 6),
+        format_units(computed.total_debt_base, health.base_decimals, 6)
     );
     Ok(())
 }

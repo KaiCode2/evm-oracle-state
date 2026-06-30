@@ -1,6 +1,7 @@
 use alloy_primitives::{Address, B256};
 
 /// Known aggregator storage layouts.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AggregatorLayout {
     /// Chainlink OCR2 `AccessControlledOCR2Aggregator 1.0.0` compatible layout.
@@ -19,6 +20,7 @@ pub enum AggregatorLayout {
 }
 
 /// How an aggregator layout was detected.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggregatorLayoutConfidence {
     /// The layout came directly from `typeAndVersion()`.

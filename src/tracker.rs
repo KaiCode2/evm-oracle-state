@@ -212,6 +212,7 @@ pub struct OraclePriceStale {
 }
 
 /// Rich oracle hook events emitted by reconciliation.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OracleHookEvent {
     /// Immediate event-derived price update.

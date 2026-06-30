@@ -119,6 +119,7 @@ pub struct OracleCacheRuntimeBuilder {
 }
 
 /// Best-effort cache-native oracle runtime build report.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct OracleCacheRuntimeBuildReport {
     /// Runtime seeded with every successfully discovered feed.
@@ -401,7 +402,11 @@ impl<P> OracleRuntime<P> {
         &mut self.tracker
     }
 
-    /// Build a fresh reactive handler from current registrations.
+    /// Build a fresh built-in Chainlink-compatible reactive handler from current registrations.
+    ///
+    /// Adapter plugin handlers are not included. Use [`Self::reactive_handlers`],
+    /// [`Self::reactive_runtime`], or [`Self::register_subscriber`] when the runtime
+    /// was built with installed adapter plugins.
     pub fn reactive_handler(&self) -> OracleReactiveHandler {
         OracleReactiveHandler::with_storage_sync(
             self.tracker.registrations().collect(),
@@ -409,16 +414,22 @@ impl<P> OracleRuntime<P> {
         )
     }
 
-    /// Build a reactive runtime with this oracle handler already installed.
+    /// Build fresh reactive handlers for every source installed in this runtime.
+    ///
+    /// The first handler is the built-in Chainlink-compatible handler. Any adapter
+    /// plugin handlers discovered during cache-native startup follow it.
+    pub fn reactive_handlers(&self) -> Vec<Arc<dyn ReactiveHandler<Ethereum>>> {
+        let mut handlers: Vec<Arc<dyn ReactiveHandler<Ethereum>>> =
+            vec![Arc::new(self.reactive_handler())];
+        handlers.extend(self.adapter_handlers.iter().cloned());
+        handlers
+    }
+
+    /// Build a reactive runtime with this oracle runtime's handlers already installed.
     pub fn reactive_runtime(&self) -> Result<ReactiveRuntime<Ethereum>, OracleError> {
         let mut runtime = ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default());
-        runtime
-            .register_handler(Arc::new(self.reactive_handler()))
-            .map_err(runtime_error)?;
-        for handler in &self.adapter_handlers {
-            runtime
-                .register_handler(Arc::clone(handler))
-                .map_err(runtime_error)?;
+        for handler in self.reactive_handlers() {
+            runtime.register_handler(handler).map_err(runtime_error)?;
         }
         Ok(runtime)
     }
@@ -520,7 +531,8 @@ impl<P> OracleRuntime<P> {
         }
     }
 
-    fn reactive_interests(&self) -> Vec<ReactiveInterest<Ethereum>> {
+    /// Return the complete log/event interest set for built-in and adapter handlers.
+    pub fn reactive_interests(&self) -> Vec<ReactiveInterest<Ethereum>> {
         let mut interests = self.reactive_handler().interests();
         for handler in &self.adapter_handlers {
             interests.extend(handler.interests());
