@@ -21,13 +21,14 @@ exclude = [".env", ".env.*", "target/", ".github/"]
 [features]
 default = []
 aave = []
+morpho = []
+euler = []
 live-tests = ["alloy-provider/ws"]
 
 [dependencies]
-# INTERIM: use the sibling checkout while evm-fork-cache's live AlloySubscriber
-# work and cold-start updates are not available from one published/git-pinned
-# release.
-evm-fork-cache = { path = "../evm-fork-cache", version = "0.1" }
+# Companion crate, published on crates.io. The live AlloySubscriber and cold-start
+# updates this crate relies on shipped in the public 0.1.0 release.
+evm-fork-cache = "0.1"
 
 alloy-eips = "1.0.38"
 alloy-network = "1.0.38"

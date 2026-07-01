@@ -607,6 +607,16 @@ pub enum OracleAdapterSkipReason {
         /// Classified discovery or compatibility error.
         error: String,
     },
+    /// The Morpho oracle source variant is not supported by this adapter.
+    UnsupportedMorphoSource {
+        /// Classified discovery or compatibility error.
+        error: String,
+    },
+    /// The Euler oracle source variant is not supported by this adapter.
+    UnsupportedEulerSource {
+        /// Classified discovery or compatibility error.
+        error: String,
+    },
 }
 
 impl OracleAdapterBuilder {
@@ -691,6 +701,12 @@ impl std::fmt::Display for OracleAdapterSkipReason {
             }
             Self::UnsupportedAaveSource { error } => {
                 write!(f, "unsupported Aave oracle source ({error})")
+            }
+            Self::UnsupportedMorphoSource { error } => {
+                write!(f, "unsupported Morpho oracle source ({error})")
+            }
+            Self::UnsupportedEulerSource { error } => {
+                write!(f, "unsupported Euler oracle source ({error})")
             }
         }
     }

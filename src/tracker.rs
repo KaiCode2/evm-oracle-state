@@ -314,6 +314,12 @@ impl OracleTracker {
         self.registry.latest(proxy)
     }
 
+    /// Return the feed registration for a proxy.
+    pub fn registration_for_proxy(&self, proxy: Address) -> Option<&FeedRegistration> {
+        let id = self.registry.id_by_proxy(proxy)?;
+        self.registry.registrations_map().get(id)
+    }
+
     /// Return the latest actionable-facing price by feed id string.
     pub fn price(&self, id: impl AsRef<str>) -> Result<OraclePrice, OracleError> {
         let registration = self
@@ -538,15 +544,17 @@ impl OracleTracker {
             block_number: update.block_number,
             block_hash: None,
         });
-        self.queue_reconciliation(OracleReconciliationRequest {
-            id: update.id,
-            proxy: update.proxy,
-            aggregator: Some(update.aggregator),
-            event_round: snapshot.round.clone(),
-            block_number: update.block_number,
-            block_hash: None,
-            log_index: update.log_index,
-        });
+        if registration.source.supports_proxy_reconciliation() {
+            self.queue_reconciliation(OracleReconciliationRequest {
+                id: update.id,
+                proxy: update.proxy,
+                aggregator: Some(update.aggregator),
+                event_round: snapshot.round.clone(),
+                block_number: update.block_number,
+                block_hash: None,
+                log_index: update.log_index,
+            });
+        }
         self.registry.replace_snapshot(snapshot);
         Ok(())
     }
@@ -585,15 +593,17 @@ impl OracleTracker {
             block_number: update.block_number,
             block_hash: update.block_hash,
         });
-        self.queue_reconciliation(OracleReconciliationRequest {
-            id: update.id,
-            proxy: update.proxy,
-            aggregator: Some(update.aggregator),
-            event_round,
-            block_number: update.block_number,
-            block_hash: update.block_hash,
-            log_index: update.log_index,
-        });
+        if registration.source.supports_proxy_reconciliation() {
+            self.queue_reconciliation(OracleReconciliationRequest {
+                id: update.id,
+                proxy: update.proxy,
+                aggregator: Some(update.aggregator),
+                event_round,
+                block_number: update.block_number,
+                block_hash: update.block_hash,
+                log_index: update.log_index,
+            });
+        }
         self.registry.replace_snapshot(snapshot);
         Ok(())
     }

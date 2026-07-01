@@ -53,6 +53,16 @@ aggregator changes, and post-reorg safety still use
   discover Aave V3 oracle sources from `getSourceOfAsset`, including
   `PriceCapAdapterStable`, ratio-cap/CAPO, peg-to-base Chainlink
   synchronicity, and fixed-price sources.
+- With the `morpho` feature, use `MorphoBlueOracleAdapter` to register Morpho
+  Blue markets or direct `MorphoChainlinkOracleV2` addresses. Chainlink
+  dependency events recompute the 36-decimal Morpho `price()` immediately, and
+  `OracleReadOverlay` can serve `price()` from typed state.
+- With the `euler` feature, use `EulerOracleAdapter` and `EulerQuotePair` to
+  register direct Euler quote adapters or router-resolved pairs. The initial
+  adapter supports `ChainlinkOracle`, `FixedRateOracle`, `RateProviderOracle`,
+  and one-level `CrossAdapter` sources composed from those legs. Chainlink
+  dependency events recompute the user-facing quote immediately, and
+  `OracleReadOverlay` can serve `getQuote(...)` / `getQuotes(...)`.
 - Queue event-specific, block-identified proxy reconciliation requests after
   committed price updates.
 - Serve simulation-facing `latestRoundData()`, `decimals()`, `description()`,
@@ -82,6 +92,8 @@ overlay reads, and direct OCR1/OCR2 storage sync are always compiled. Optional
 features currently add focused surfaces:
 
 - `aave`: enables `AaveV3OracleAdapter` and `AaveAsset` discovery helpers.
+- `morpho`: enables Morpho Blue oracle discovery helpers.
+- `euler`: enables Euler quote-oracle discovery helpers.
 - `live-tests`: enables websocket dependencies used by RPC-gated live tests.
 
 ## Event to Simulation Flow
@@ -203,6 +215,49 @@ let tracker = AaveV3OracleAdapter::new(aave_oracle)
     .await?;
 ```
 
+With `--features morpho`, Morpho Blue market oracles can be registered from a
+market id:
+
+```rust
+use evm_oracle_state::{AssetId, Denomination, MorphoBlueMarket, MorphoBlueOracleAdapter};
+
+let mut oracle = OracleRuntime::cache_builder()
+    .install_adapter(
+        MorphoBlueOracleAdapter::new(morpho_blue)
+            .market(
+                MorphoBlueMarket::market_id(market_id)
+                    .id("morpho-weth-usdc")
+                    .label("Morpho WETH/USDC")
+                    .base(AssetId::symbol("WETH"))
+                    .quote(Denomination::from("USDC"))
+                    .max_age_secs(3600),
+            ),
+    )
+    .build(&mut cache)
+    .await?;
+```
+
+With `--features euler`, Euler quote oracles can be registered from direct
+adapters or router-resolved pairs:
+
+```rust
+use evm_oracle_state::{AssetId, Denomination, EulerOracleAdapter, EulerQuotePair};
+
+let mut oracle = OracleRuntime::cache_builder()
+    .install_adapter(
+        EulerOracleAdapter::router(euler_router).quote_pair(
+            EulerQuotePair::new(weth, usdc)
+                .id("euler-weth-usdc")
+                .label("Euler WETH/USDC")
+                .base_label(AssetId::symbol("WETH"))
+                .quote_label(Denomination::from("USDC"))
+                .max_age_secs(3600),
+        ),
+    )
+    .build(&mut cache)
+    .await?;
+```
+
 ## Oracle Adapter Plugins
 
 Oracle families that are not plain Chainlink proxies can plug into the same
@@ -278,6 +333,10 @@ built-in Chainlink-compatible handler.
 
 - No durable database or indexer.
 - No Chainlink Feed Registry integration.
+- Morpho and Euler adapter-specific reconciliation is not yet wired into
+  `OracleReconciler`; dependency-event prices are marked `EventPending` and are
+  intended for fast-path simulation via overlay until periodic protocol reads
+  confirm them.
 - Aave source discovery currently supports plain Chainlink-compatible sources,
   `PriceCapAdapterStable`, ratio-cap/CAPO, peg-to-base Chainlink
   synchronicity, and fixed-price sources. EUR cap variants, base-to-peg and
@@ -333,6 +392,7 @@ cargo run --example chainlink_live_probe
 ETH_RPC_URL=https://example-rpc.invalid cargo run --example chainlink_live_probe
 ETH_RPC_URL=https://example-rpc.invalid SMOKE_DURATION_SECS=600 cargo run --example chainlink_reactive_smoke
 ETH_RPC_URL=https://example-http-rpc.invalid ETH_WS_RPC_URL=wss://example-ws-rpc.invalid AAVE_DEMO_DURATION_SECS=600 cargo run --features aave --example aave_v3_health_factor -- 0xcc144c2e9fc40f92257b2cd7cc43e1f82666f09a
+ETH_RPC_URL=https://example-http-rpc.invalid ETH_WS_RPC_URL=wss://example-ws-rpc.invalid MORPHO_MARKET_ID=0x... EULER_ORACLE=0x... EULER_BASE=0x... EULER_QUOTE=0x... cargo run --features morpho,euler --example morpho_euler_reactive_value
 ```
 
 When `ETH_RPC_URL` is unset, live examples exit successfully without making
@@ -353,3 +413,13 @@ interests with `evm-fork-cache`'s `AlloySubscriber`; every `OraclePriceUpdate`
 hook prints the new oracle answer and recomputes the health factor from the
 event-mutated cache. It also prints the DeBank CLI command used for an
 off-chain portfolio sanity check.
+
+`morpho_euler_reactive_value` is a cache-backed Morpho/Euler oracle tracking
+demo. It discovers a Morpho Blue market or direct Morpho oracle, discovers an
+Euler quote oracle, installs both adapters into `OracleRuntime`, registers the
+resulting interests with `evm-fork-cache`'s `AlloySubscriber`, and prints
+health-factor-style value math from typed oracle prices on cold start and after
+live `OraclePriceUpdate` hooks. The Morpho calculation uses the market LLTV; the
+Euler calculation uses `EULER_LTV_WAD` because exact Euler account health is
+vault/controller specific. When `ETH_WS_RPC_URL` is unset, the example derives a
+websocket URL from `ETH_RPC_URL` by replacing `https://` with `wss://`.

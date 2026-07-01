@@ -10,9 +10,13 @@ mod adapter;
 mod cache_reader;
 mod config;
 mod error;
+#[cfg(feature = "euler")]
+mod euler;
 mod events;
 mod feed;
 mod layout;
+#[cfg(feature = "morpho")]
+mod morpho;
 mod overlay;
 mod price;
 mod provider;
@@ -38,6 +42,8 @@ pub use cache_reader::{
 };
 pub use config::{FeedConfig, StalenessPolicy};
 pub use error::{ChainlinkEventDecodeError, OracleError, OracleSignalDecodeError};
+#[cfg(feature = "euler")]
+pub use euler::{EulerOracleAdapter, EulerQuotePair};
 pub use events::{
     ANSWER_UPDATED_TOPIC, AnswerUpdated, NEW_ROUND_TOPIC, NewRound, OCR1_NEW_TRANSMISSION_TOPIC,
     OCR2_NEW_TRANSMISSION_TOPIC, Ocr1NewTransmission, Ocr2NewTransmission, decode_answer_updated,
@@ -48,11 +54,16 @@ pub use layout::{
     AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence,
     classify_type_and_version,
 };
+#[cfg(feature = "morpho")]
+pub use morpho::{MorphoBlueMarket, MorphoBlueOracleAdapter, MorphoMarketParams};
 pub use overlay::OracleReadOverlay;
 pub use price::{CheckedPrice, OraclePrice, PricePolicy};
 pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
 pub use reactive::OracleReactiveHandler;
-pub use registry::{AggregatorChange, FeedId, FeedRegistration, FeedSource, OracleRegistry};
+pub use registry::{
+    AggregatorChange, EulerQuoteLeg, FeedId, FeedRegistration, FeedSource, MorphoChainlinkFeed,
+    MorphoChainlinkFeedRole, OracleDependency, OracleRegistry,
+};
 pub use runtime::{
     ChainlinkFeed, OracleCacheRuntimeBuildReport, OracleCacheRuntimeBuilder, OracleRuntime,
     OracleRuntimeBuilder,

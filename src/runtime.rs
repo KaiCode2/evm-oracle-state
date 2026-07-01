@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fmt,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -419,9 +420,15 @@ impl<P> OracleRuntime<P> {
     /// The first handler is the built-in Chainlink-compatible handler. Any adapter
     /// plugin handlers discovered during cache-native startup follow it.
     pub fn reactive_handlers(&self) -> Vec<Arc<dyn ReactiveHandler<Ethereum>>> {
-        let mut handlers: Vec<Arc<dyn ReactiveHandler<Ethereum>>> =
-            vec![Arc::new(self.reactive_handler())];
-        handlers.extend(self.adapter_handlers.iter().cloned());
+        let built_in: Arc<dyn ReactiveHandler<Ethereum>> = Arc::new(self.reactive_handler());
+        let mut seen = BTreeSet::from([built_in.id()]);
+        let mut handlers = vec![built_in];
+        handlers.extend(
+            self.adapter_handlers
+                .iter()
+                .filter(|handler| seen.insert(handler.id()))
+                .cloned(),
+        );
         handlers
     }
 
@@ -533,8 +540,8 @@ impl<P> OracleRuntime<P> {
 
     /// Return the complete log/event interest set for built-in and adapter handlers.
     pub fn reactive_interests(&self) -> Vec<ReactiveInterest<Ethereum>> {
-        let mut interests = self.reactive_handler().interests();
-        for handler in &self.adapter_handlers {
+        let mut interests = Vec::new();
+        for handler in self.reactive_handlers() {
             interests.extend(handler.interests());
         }
         interests

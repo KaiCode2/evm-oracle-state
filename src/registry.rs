@@ -30,6 +30,170 @@ impl std::fmt::Display for FeedId {
     }
 }
 
+/// One Chainlink-compatible dependency used by a derived oracle source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OracleDependency {
+    /// Dependency proxy address.
+    pub proxy: Address,
+    /// Dependency current aggregator address.
+    pub aggregator: Address,
+    /// Last known dependency answer.
+    pub answer: I256,
+}
+
+impl OracleDependency {
+    /// Construct a derived oracle dependency.
+    pub fn new(proxy: Address, aggregator: Address, answer: I256) -> Self {
+        Self {
+            proxy,
+            aggregator,
+            answer,
+        }
+    }
+}
+
+/// Role of a Chainlink dependency inside `MorphoChainlinkOracleV2`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MorphoChainlinkFeedRole {
+    /// First numerator feed.
+    BaseFeed1,
+    /// Second numerator feed.
+    BaseFeed2,
+    /// First denominator feed.
+    QuoteFeed1,
+    /// Second denominator feed.
+    QuoteFeed2,
+}
+
+/// One optional Chainlink feed used by `MorphoChainlinkOracleV2`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MorphoChainlinkFeed {
+    /// Feed role in the Morpho formula.
+    pub role: MorphoChainlinkFeedRole,
+    /// Dependency proxy, aggregator, and answer.
+    pub dependency: OracleDependency,
+}
+
+impl MorphoChainlinkFeed {
+    /// Construct a Morpho Chainlink dependency.
+    pub fn new(role: MorphoChainlinkFeedRole, dependency: OracleDependency) -> Self {
+        Self { role, dependency }
+    }
+}
+
+/// One dependency leg inside an Euler quote adapter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EulerQuoteLeg {
+    /// Chainlink-backed Euler `ChainlinkOracle` leg.
+    Chainlink {
+        /// Euler leg adapter address.
+        oracle: Address,
+        /// Chainlink feed proxy.
+        feed: Address,
+        /// Chainlink feed current aggregator.
+        aggregator: Address,
+        /// Last known Chainlink answer.
+        answer: I256,
+        /// Chainlink feed decimals.
+        feed_decimals: u8,
+        /// True when the requested leg is the inverse of the adapter's configured pair.
+        inverse: bool,
+        /// Output decimals for this leg.
+        quote_decimals: u8,
+    },
+    /// Euler `FixedRateOracle` leg.
+    FixedRate {
+        /// Euler leg adapter address.
+        oracle: Address,
+        /// Fixed rate scaled to this leg's quote decimals.
+        rate: I256,
+        /// True when the requested leg is the inverse of the adapter's configured pair.
+        inverse: bool,
+        /// Requested base decimals.
+        base_decimals: u8,
+        /// Requested quote decimals.
+        quote_decimals: u8,
+    },
+    /// Euler `RateProviderOracle` leg.
+    RateProvider {
+        /// Euler leg adapter address.
+        oracle: Address,
+        /// Rate provider contract.
+        rate_provider: Address,
+        /// Last known 18-decimal rate.
+        rate: I256,
+        /// True when the requested leg is the inverse of the adapter's configured pair.
+        inverse: bool,
+        /// Output decimals for this leg.
+        quote_decimals: u8,
+    },
+}
+
+impl EulerQuoteLeg {
+    /// Return the event aggregator that drives this leg, if any.
+    pub fn event_aggregator(&self) -> Option<Address> {
+        match self {
+            Self::Chainlink { aggregator, .. } => Some(*aggregator),
+            Self::FixedRate { .. } | Self::RateProvider { .. } => None,
+        }
+    }
+
+    /// Return the leg price scaled to the leg quote decimals.
+    pub fn price(&self) -> I256 {
+        self.price_from_event(None, I256::ZERO)
+    }
+
+    /// Return the leg price with a dependency event answer applied when relevant.
+    pub fn price_from_event(&self, aggregator: Option<Address>, answer: I256) -> I256 {
+        match self {
+            Self::Chainlink {
+                aggregator: dependency_aggregator,
+                answer: stored_answer,
+                feed_decimals,
+                inverse,
+                quote_decimals,
+                ..
+            } => {
+                let answer = if aggregator == Some(*dependency_aggregator) {
+                    answer
+                } else {
+                    *stored_answer
+                };
+                if *inverse {
+                    inverse_positive_price(answer, *feed_decimals, *quote_decimals)
+                } else {
+                    scale_positive_price(answer, *feed_decimals, *quote_decimals)
+                }
+            }
+            Self::FixedRate {
+                rate,
+                inverse,
+                base_decimals,
+                quote_decimals,
+                ..
+            } => {
+                if *inverse {
+                    inverse_fixed_rate(*rate, *base_decimals, *quote_decimals)
+                } else {
+                    *rate
+                }
+            }
+            Self::RateProvider {
+                rate,
+                inverse,
+                quote_decimals,
+                ..
+            } => {
+                if *inverse {
+                    inverse_positive_price(*rate, 18, *quote_decimals)
+                } else {
+                    scale_positive_price(*rate, 18, *quote_decimals)
+                }
+            }
+        }
+    }
+}
+
 /// Network source and transform for a registered feed.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -90,6 +254,55 @@ pub enum FeedSource {
         source: Address,
         /// Fixed user-facing answer.
         price: I256,
+    },
+    /// Morpho Blue `MorphoChainlinkOracleV2` source composed from Chainlink feeds and optional vault conversions.
+    MorphoChainlinkV2 {
+        /// User-facing Morpho oracle.
+        source: Address,
+        /// Latest base-vault conversion factor, or 1 when no base vault is configured.
+        base_vault_assets: I256,
+        /// Latest quote-vault conversion factor, or 1 when no quote vault is configured.
+        quote_vault_assets: I256,
+        /// Immutable Morpho scale factor.
+        scale_factor: I256,
+        /// Non-zero Chainlink feed dependencies.
+        feeds: Vec<MorphoChainlinkFeed>,
+    },
+    /// Euler quote source backed by a single leg.
+    EulerQuote {
+        /// User-facing Euler oracle adapter or router.
+        source: Address,
+        /// Base asset for the quote.
+        base: Address,
+        /// Quote asset for the quote.
+        quote: Address,
+        /// Base token decimals.
+        base_decimals: u8,
+        /// Quote token decimals.
+        quote_decimals: u8,
+        /// Quote leg.
+        leg: EulerQuoteLeg,
+    },
+    /// Euler `CrossAdapter` quote source backed by two quote legs.
+    EulerCross {
+        /// User-facing Euler cross adapter.
+        source: Address,
+        /// Base asset for the final quote.
+        base: Address,
+        /// Intermediate asset.
+        cross: Address,
+        /// Quote asset for the final quote.
+        quote: Address,
+        /// Base token decimals.
+        base_decimals: u8,
+        /// Intermediate token decimals.
+        cross_decimals: u8,
+        /// Quote token decimals.
+        quote_decimals: u8,
+        /// Base-to-cross leg.
+        base_cross: EulerQuoteLeg,
+        /// Cross-to-quote leg.
+        cross_quote: EulerQuoteLeg,
     },
     /// Adapter-owned oracle source.
     Custom(OracleSourceDescriptor),
@@ -161,6 +374,68 @@ impl FeedSource {
         Self::AaveFixedPrice { source, price }
     }
 
+    /// Construct a Morpho Blue Chainlink V2 source transform.
+    pub fn morpho_chainlink_v2(
+        source: Address,
+        base_vault_assets: I256,
+        quote_vault_assets: I256,
+        scale_factor: I256,
+        feeds: Vec<MorphoChainlinkFeed>,
+    ) -> Self {
+        Self::MorphoChainlinkV2 {
+            source,
+            base_vault_assets,
+            quote_vault_assets,
+            scale_factor,
+            feeds,
+        }
+    }
+
+    /// Construct an Euler quote source backed by one quote leg.
+    pub fn euler_quote(
+        source: Address,
+        base: Address,
+        quote: Address,
+        base_decimals: u8,
+        quote_decimals: u8,
+        leg: EulerQuoteLeg,
+    ) -> Self {
+        Self::EulerQuote {
+            source,
+            base,
+            quote,
+            base_decimals,
+            quote_decimals,
+            leg,
+        }
+    }
+
+    /// Construct an Euler cross-adapter source backed by two quote legs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn euler_cross(
+        source: Address,
+        base: Address,
+        cross: Address,
+        quote: Address,
+        base_decimals: u8,
+        cross_decimals: u8,
+        quote_decimals: u8,
+        base_cross: EulerQuoteLeg,
+        cross_quote: EulerQuoteLeg,
+    ) -> Self {
+        Self::EulerCross {
+            source,
+            base,
+            cross,
+            quote,
+            base_decimals,
+            cross_decimals,
+            quote_decimals,
+            base_cross,
+            cross_quote,
+        }
+    }
+
     /// Construct an adapter-owned custom source.
     pub fn custom(descriptor: OracleSourceDescriptor) -> Self {
         Self::Custom(descriptor)
@@ -179,12 +454,21 @@ impl FeedSource {
                 | Self::AavePriceCapStable { .. }
                 | Self::AaveRatioCap { .. }
                 | Self::AaveSynchronicityPegToBase { .. }
+                | Self::MorphoChainlinkV2 { .. }
+                | Self::EulerQuote { .. }
+                | Self::EulerCross { .. }
         )
     }
 
     /// Return true when this source can be reconciled by reading a Chainlink proxy.
     pub fn supports_proxy_reconciliation(&self) -> bool {
-        !matches!(self, Self::AaveFixedPrice { .. })
+        !matches!(
+            self,
+            Self::AaveFixedPrice { .. }
+                | Self::MorphoChainlinkV2 { .. }
+                | Self::EulerQuote { .. }
+                | Self::EulerCross { .. }
+        )
     }
 
     /// Proxy that should be read for authoritative Chainlink round data.
@@ -201,6 +485,9 @@ impl FeedSource {
                 asset_to_peg_proxy, ..
             } => *asset_to_peg_proxy,
             Self::AaveFixedPrice { source, .. } => *source,
+            Self::MorphoChainlinkV2 { source, .. }
+            | Self::EulerQuote { source, .. }
+            | Self::EulerCross { source, .. } => *source,
             Self::Custom(descriptor) => descriptor.read_proxy,
         }
     }
@@ -213,6 +500,20 @@ impl FeedSource {
                 peg_to_base_aggregator,
                 ..
             } => vec![*asset_to_peg_aggregator, *peg_to_base_aggregator],
+            Self::MorphoChainlinkV2 { feeds, .. } => feeds
+                .iter()
+                .map(|feed| feed.dependency.aggregator)
+                .collect(),
+            Self::EulerQuote { leg, .. } => leg.event_aggregator().into_iter().collect(),
+            Self::EulerCross {
+                base_cross,
+                cross_quote,
+                ..
+            } => base_cross
+                .event_aggregator()
+                .into_iter()
+                .chain(cross_quote.event_aggregator())
+                .collect(),
             Self::AaveFixedPrice { .. } => Vec::new(),
             _ => current_aggregator.into_iter().collect(),
         }
@@ -236,9 +537,11 @@ impl FeedSource {
         aggregator: Address,
     ) -> bool {
         match self {
-            Self::AaveRatioCap { .. } | Self::AaveSynchronicityPegToBase { .. } => {
-                self.accepts_event_from(current_aggregator, aggregator)
-            }
+            Self::AaveRatioCap { .. }
+            | Self::AaveSynchronicityPegToBase { .. }
+            | Self::MorphoChainlinkV2 { .. }
+            | Self::EulerQuote { .. }
+            | Self::EulerCross { .. } => self.accepts_event_from(current_aggregator, aggregator),
             _ => false,
         }
     }
@@ -247,7 +550,11 @@ impl FeedSource {
     pub fn supports_direct_chainlink_storage_effects(&self) -> bool {
         !matches!(
             self,
-            Self::AaveRatioCap { .. } | Self::AaveSynchronicityPegToBase { .. }
+            Self::AaveRatioCap { .. }
+                | Self::AaveSynchronicityPegToBase { .. }
+                | Self::MorphoChainlinkV2 { .. }
+                | Self::EulerQuote { .. }
+                | Self::EulerCross { .. }
         )
     }
 
@@ -313,6 +620,31 @@ impl FeedSource {
                 )
             }
             Self::AaveFixedPrice { price, .. } => *price,
+            Self::MorphoChainlinkV2 {
+                base_vault_assets,
+                quote_vault_assets,
+                scale_factor,
+                feeds,
+                ..
+            } => normalize_morpho_chainlink_v2_answer(
+                *base_vault_assets,
+                *quote_vault_assets,
+                *scale_factor,
+                feeds,
+                aggregator,
+                answer,
+            ),
+            Self::EulerQuote { leg, .. } => leg.price_from_event(aggregator, answer),
+            Self::EulerCross {
+                cross_decimals,
+                base_cross,
+                cross_quote,
+                ..
+            } => normalize_euler_cross_answer(
+                base_cross.price_from_event(aggregator, answer),
+                cross_quote.price_from_event(aggregator, answer),
+                *cross_decimals,
+            ),
             Self::Custom(descriptor) => match &descriptor.transform {
                 OracleTransformDescriptor::Identity | OracleTransformDescriptor::Custom { .. } => {
                     answer
@@ -330,6 +662,9 @@ impl FeedSource {
                 asset_to_peg_aggregator,
                 ..
             } => self.normalize_answer_from_event(Some(*asset_to_peg_aggregator), round.answer),
+            Self::MorphoChainlinkV2 { .. } | Self::EulerQuote { .. } | Self::EulerCross { .. } => {
+                round.answer
+            }
             _ => self.normalize_answer(round.answer),
         };
         round
@@ -421,6 +756,92 @@ fn normalize_synchronicity_answer(
         .saturating_mul(decimal_scale(output_decimals));
     let denominator = decimal_scale(asset_to_peg_decimals.saturating_add(peg_to_base_decimals));
     div_or_zero(numerator, denominator)
+}
+
+fn normalize_morpho_chainlink_v2_answer(
+    base_vault_assets: I256,
+    quote_vault_assets: I256,
+    scale_factor: I256,
+    feeds: &[MorphoChainlinkFeed],
+    aggregator: Option<Address>,
+    answer: I256,
+) -> I256 {
+    if base_vault_assets < I256::ZERO
+        || quote_vault_assets <= I256::ZERO
+        || scale_factor <= I256::ZERO
+    {
+        return I256::ZERO;
+    }
+
+    let mut numerator = scale_factor.saturating_mul(base_vault_assets);
+    let mut denominator = quote_vault_assets;
+    for feed in feeds {
+        let feed_answer = if aggregator == Some(feed.dependency.aggregator) {
+            answer
+        } else {
+            feed.dependency.answer
+        };
+        if feed_answer < I256::ZERO {
+            return I256::ZERO;
+        }
+        match feed.role {
+            MorphoChainlinkFeedRole::BaseFeed1 | MorphoChainlinkFeedRole::BaseFeed2 => {
+                numerator = numerator.saturating_mul(feed_answer);
+            }
+            MorphoChainlinkFeedRole::QuoteFeed1 | MorphoChainlinkFeedRole::QuoteFeed2 => {
+                denominator = denominator.saturating_mul(feed_answer);
+            }
+        }
+    }
+
+    div_or_zero(numerator, denominator)
+}
+
+fn normalize_euler_cross_answer(
+    base_cross_price: I256,
+    cross_quote_price: I256,
+    cross_decimals: u8,
+) -> I256 {
+    if base_cross_price <= I256::ZERO || cross_quote_price <= I256::ZERO {
+        return I256::ZERO;
+    }
+    div_or_zero(
+        base_cross_price.saturating_mul(cross_quote_price),
+        decimal_scale(cross_decimals),
+    )
+}
+
+fn scale_positive_price(answer: I256, from_decimals: u8, to_decimals: u8) -> I256 {
+    if answer <= I256::ZERO {
+        return I256::ZERO;
+    }
+    if from_decimals == to_decimals {
+        answer
+    } else if from_decimals < to_decimals {
+        answer.saturating_mul(decimal_scale(to_decimals - from_decimals))
+    } else {
+        div_or_zero(answer, decimal_scale(from_decimals - to_decimals))
+    }
+}
+
+fn inverse_positive_price(answer: I256, feed_decimals: u8, quote_decimals: u8) -> I256 {
+    if answer <= I256::ZERO {
+        return I256::ZERO;
+    }
+    div_or_zero(
+        decimal_scale(feed_decimals.saturating_add(quote_decimals)),
+        answer,
+    )
+}
+
+fn inverse_fixed_rate(rate: I256, base_decimals: u8, quote_decimals: u8) -> I256 {
+    if rate <= I256::ZERO {
+        return I256::ZERO;
+    }
+    div_or_zero(
+        decimal_scale(base_decimals.saturating_add(quote_decimals)),
+        rate,
+    )
 }
 
 /// Registered Chainlink-compatible proxy feed.
@@ -522,7 +943,7 @@ impl OracleRegistry {
         .await
     }
 
-    #[cfg(feature = "aave")]
+    #[allow(dead_code)]
     pub(crate) async fn register_discovered_feed<P: ChainlinkFeedProvider>(
         &mut self,
         provider: &P,

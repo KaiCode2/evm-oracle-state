@@ -1,7 +1,10 @@
-use alloy_primitives::{Address, Bytes, U256, Uint};
+use alloy_primitives::{Address, Bytes, I256, U256, Uint};
 use alloy_sol_types::{SolCall, sol};
 
-use crate::{FeedStatus, OracleError, OracleSnapshot, OracleSnapshotStatus, OracleTracker};
+use crate::{
+    FeedRegistration, FeedSource, FeedStatus, OracleError, OracleSnapshot, OracleSnapshotStatus,
+    OracleTracker,
+};
 
 sol! {
     interface AggregatorV3Interface {
@@ -16,9 +19,20 @@ sol! {
         function description() external view returns (string);
         function version() external view returns (uint256);
     }
+
+    interface MorphoOracleInterface {
+        function price() external view returns (uint256);
+    }
+
+    interface EulerPriceOracleInterface {
+        function getQuote(uint256 inAmount, address base, address quote) external view returns (uint256 outAmount);
+        function getQuotes(uint256 inAmount, address base, address quote) external view returns (uint256 bidOutAmount, uint256 askOutAmount);
+    }
 }
 
 use AggregatorV3Interface::{decimalsCall, descriptionCall, latestRoundDataCall, versionCall};
+use EulerPriceOracleInterface::{getQuoteCall, getQuotesCall, getQuotesReturn};
+use MorphoOracleInterface::priceCall;
 
 /// Simulation-facing ABI call overlay backed by typed oracle state.
 pub struct OracleReadOverlay<'a> {
@@ -36,7 +50,27 @@ impl<'a> OracleReadOverlay<'a> {
         let Some(snapshot) = self.tracker.latest(target) else {
             return Ok(None);
         };
+        let Some(registration) = self.tracker.registration_for_proxy(target) else {
+            return Ok(None);
+        };
         if !is_actionable(snapshot) || calldata.len() != 4 {
+            if is_actionable(snapshot)
+                && let Some(bytes) = try_euler_call(registration, snapshot, calldata)?
+            {
+                return Ok(Some(bytes));
+            }
+            return Ok(None);
+        }
+
+        if calldata == priceCall::SELECTOR
+            && matches!(registration.source, FeedSource::MorphoChainlinkV2 { .. })
+        {
+            return Ok(Some(Bytes::from(priceCall::abi_encode_returns(
+                &i256_to_u256(snapshot.round.answer, "price")?,
+            ))));
+        }
+
+        if !supports_chainlink_overlay(&registration.source) {
             return Ok(None);
         }
 
@@ -77,6 +111,105 @@ impl<'a> OracleReadOverlay<'a> {
     }
 }
 
+fn supports_chainlink_overlay(source: &FeedSource) -> bool {
+    !matches!(
+        source,
+        FeedSource::MorphoChainlinkV2 { .. }
+            | FeedSource::EulerQuote { .. }
+            | FeedSource::EulerCross { .. }
+    )
+}
+
+fn try_euler_call(
+    registration: &FeedRegistration,
+    snapshot: &OracleSnapshot,
+    calldata: &[u8],
+) -> Result<Option<Bytes>, OracleError> {
+    let (base, quote, base_decimals, _quote_decimals) = match &registration.source {
+        FeedSource::EulerQuote {
+            base,
+            quote,
+            base_decimals,
+            quote_decimals,
+            ..
+        }
+        | FeedSource::EulerCross {
+            base,
+            quote,
+            base_decimals,
+            quote_decimals,
+            ..
+        } => (*base, *quote, *base_decimals, *quote_decimals),
+        _ => return Ok(None),
+    };
+
+    if calldata.len() >= 4 && calldata[..4] == getQuoteCall::SELECTOR {
+        let call = getQuoteCall::abi_decode(calldata).map_err(|error| {
+            OracleError::Provider(format!("decode Euler getQuote failed: {error}"))
+        })?;
+        let out = euler_quote_amount(
+            call.inAmount,
+            call.base,
+            call.quote,
+            base,
+            quote,
+            base_decimals,
+            snapshot.round.answer,
+        )?;
+        return Ok(Some(Bytes::from(getQuoteCall::abi_encode_returns(&out))));
+    }
+
+    if calldata.len() >= 4 && calldata[..4] == getQuotesCall::SELECTOR {
+        let call = getQuotesCall::abi_decode(calldata).map_err(|error| {
+            OracleError::Provider(format!("decode Euler getQuotes failed: {error}"))
+        })?;
+        let out = euler_quote_amount(
+            call.inAmount,
+            call.base,
+            call.quote,
+            base,
+            quote,
+            base_decimals,
+            snapshot.round.answer,
+        )?;
+        return Ok(Some(Bytes::from(getQuotesCall::abi_encode_returns(
+            &getQuotesReturn {
+                bidOutAmount: out,
+                askOutAmount: out,
+            },
+        ))));
+    }
+
+    Ok(None)
+}
+
+fn euler_quote_amount(
+    in_amount: U256,
+    given_base: Address,
+    given_quote: Address,
+    base: Address,
+    quote: Address,
+    base_decimals: u8,
+    raw_price: I256,
+) -> Result<U256, OracleError> {
+    let price = i256_to_u256(raw_price, "Euler price")?;
+    if given_base == base && given_quote == quote {
+        return Ok(in_amount
+            .saturating_mul(price)
+            .checked_div(decimal_scale_u256(base_decimals))
+            .unwrap_or(U256::ZERO));
+    }
+    if given_base == quote && given_quote == base {
+        return Ok(in_amount
+            .saturating_mul(decimal_scale_u256(base_decimals))
+            .checked_div(price)
+            .unwrap_or(U256::ZERO));
+    }
+    Err(OracleError::Provider(
+        "Euler overlay request does not match registered base/quote".to_string(),
+    ))
+}
+
 fn is_actionable(snapshot: &OracleSnapshot) -> bool {
     snapshot.status == FeedStatus::Fresh
         && matches!(
@@ -97,4 +230,17 @@ fn u256_to_uint80(value: U256, field: &'static str) -> Result<Uint<80, 2>, Oracl
     }
     Uint::<80, 2>::try_from(value)
         .map_err(|_| OracleError::Provider(format!("{field} does not fit uint80")))
+}
+
+fn i256_to_u256(value: I256, field: &'static str) -> Result<U256, OracleError> {
+    U256::try_from(value)
+        .map_err(|_| OracleError::Provider(format!("{field} is negative or too large")))
+}
+
+fn decimal_scale_u256(decimals: u8) -> U256 {
+    let mut scale = U256::from(1_u8);
+    for _ in 0..decimals {
+        scale = scale.saturating_mul(U256::from(10_u8));
+    }
+    scale
 }

@@ -7,7 +7,7 @@ use evm_fork_cache::{cache::EvmCache, reactive::ReactiveHandler};
 use crate::{FeedRegistration, OracleAdapterFeedSkip, OracleError, OracleStorageSync, RoundData};
 
 /// Boxed async result returned by oracle adapter extension points.
-pub type AdapterFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OracleError>> + Send + 'a>>;
+pub type AdapterFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OracleError>> + 'a>>;
 
 /// Stable identifier for an oracle adapter family.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
