@@ -61,10 +61,26 @@ fn metadata() -> FeedMetadata {
 }
 
 fn registration(proxy: Address, aggregator: Address) -> FeedRegistration {
-    FeedRegistration {
-        id: FeedId::new("eth-usd"),
+    registration_with_source(
+        "eth-usd",
         proxy,
-        label: Some("ETH/USD".to_string()),
+        aggregator,
+        FeedSource::Chainlink,
+        "ETH/USD",
+    )
+}
+
+fn registration_with_source(
+    id: &str,
+    proxy: Address,
+    aggregator: Address,
+    source: FeedSource,
+    label: &str,
+) -> FeedRegistration {
+    FeedRegistration {
+        id: FeedId::new(id),
+        proxy,
+        label: Some(label.to_string()),
         base: Some("ETH".to_string()),
         quote: Some("USD".to_string()),
         staleness: StalenessPolicy::max_age(3_600),
@@ -75,7 +91,7 @@ fn registration(proxy: Address, aggregator: Address) -> FeedRegistration {
             None,
         )),
         metadata: metadata(),
-        source: FeedSource::Chainlink,
+        source,
     }
 }
 
@@ -345,6 +361,92 @@ fn ocr2_new_transmission_emits_exact_state_updates_and_started_at_hook() {
         .expect("price update hook");
     assert_eq!(update.started_at, 1_700_000_040);
     assert_eq!(update.updated_at, 1_700_000_120);
+}
+
+#[test]
+fn shared_ocr2_dependency_emits_one_storage_update_set_and_fans_out_hooks() {
+    let chainlink_proxy = Address::repeat_byte(0x10);
+    let aave_source = Address::repeat_byte(0x11);
+    let aggregator = Address::repeat_byte(0x20);
+    let registrations = vec![
+        registration_with_source(
+            "eth-usd",
+            chainlink_proxy,
+            aggregator,
+            FeedSource::Chainlink,
+            "ETH/USD",
+        ),
+        registration_with_source(
+            "aave-capped-eth-usd",
+            aave_source,
+            aggregator,
+            FeedSource::aave_price_cap_stable(
+                aave_source,
+                chainlink_proxy,
+                I256::unchecked_from(2_000_000_000_i64),
+            ),
+            "Aave capped ETH/USD",
+        ),
+    ];
+    let handler = OracleReactiveHandler::with_storage_sync(
+        registrations,
+        OracleStorageSync::new().with_adapter(Arc::new(ChainlinkOcr2StorageAdapter::new())),
+    );
+    let interests = handler.interests();
+    assert_eq!(
+        interests.len(),
+        1,
+        "one shared OCR2 dependency should produce one subscription interest"
+    );
+    let state = MapStateView::default().with_slot(
+        aggregator,
+        ChainlinkOcr2StorageAdapter::hot_vars_slot(),
+        U256::from(0xaaaa_u64),
+    );
+
+    let outcome = handler
+        .handle(
+            &context(120, 0),
+            &ReactiveInput::<Ethereum>::Log(ocr2_new_transmission_log(aggregator)),
+            &state,
+        )
+        .expect("handler outcome");
+
+    let state_updates = outcome
+        .effects
+        .iter()
+        .filter(|effect| matches!(effect, ReactiveEffect::StateUpdate(_)))
+        .count();
+    assert_eq!(
+        state_updates, 2,
+        "shared dependency should write OCR2 hot vars and transmission once"
+    );
+
+    let mut price_updates = outcome
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            ReactiveEffect::Hook(signal)
+                if signal.kind.as_ref() == OracleSignalKind::PriceUpdate.as_str() =>
+            {
+                signal.payload.as_ref()?.downcast_ref::<OraclePriceUpdate>()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    price_updates.sort_by_key(|update| update.id.as_str().to_string());
+    assert_eq!(price_updates.len(), 2);
+    assert_eq!(price_updates[0].id.as_str(), "aave-capped-eth-usd");
+    assert_eq!(
+        price_updates[0].raw_answer,
+        I256::unchecked_from(2_000_000_000_i64),
+        "Aave hook should still receive its normalized capped answer"
+    );
+    assert_eq!(price_updates[1].id.as_str(), "eth-usd");
+    assert_eq!(
+        price_updates[1].raw_answer,
+        I256::unchecked_from(2_100_000_000_i64)
+    );
 }
 
 #[test]

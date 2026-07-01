@@ -18,9 +18,9 @@ use evm_fork_cache::{
 };
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, EulerQuoteLeg, FeedId, FeedMetadata, FeedRegistration, FeedSource,
-    FeedStatus, MorphoChainlinkFeed, MorphoChainlinkFeedRole, OracleDependency,
-    OracleReactiveHandler, OracleReadOverlay, OracleTracker, RoundData, SnapshotSource,
-    StalenessPolicy,
+    FeedStatus, MorphoChainlinkFeed, MorphoChainlinkFeedRole, OracleDependency, OraclePriceUpdate,
+    OracleReactiveHandler, OracleReadOverlay, OracleSignalKind, OracleTracker, RoundData,
+    SnapshotSource, StalenessPolicy,
 };
 
 sol! {
@@ -119,12 +119,124 @@ fn round(answer: i64) -> RoundData {
     }
 }
 
+fn price_update_hooks(
+    outcome: &evm_fork_cache::reactive::HandlerOutcome,
+) -> Vec<&OraclePriceUpdate> {
+    outcome
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            evm_fork_cache::reactive::ReactiveEffect::Hook(signal)
+                if signal.kind.as_ref() == OracleSignalKind::PriceUpdate.as_str() =>
+            {
+                signal.payload.as_ref()?.downcast_ref::<OraclePriceUpdate>()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn metadata(decimals: u8, description: &str) -> FeedMetadata {
     FeedMetadata {
         decimals,
         description: description.to_string(),
         version: U256::ZERO,
     }
+}
+
+#[cfg(all(feature = "morpho", feature = "euler"))]
+#[test]
+fn shared_morpho_euler_dependency_uses_one_interest_and_fans_out_hooks() {
+    let aggregator = Address::repeat_byte(0x12);
+    let morpho_oracle = Address::repeat_byte(0x10);
+    let morpho_feed = Address::repeat_byte(0x11);
+    let euler_oracle = Address::repeat_byte(0x30);
+    let base = Address::repeat_byte(0x31);
+    let quote = Address::repeat_byte(0x32);
+    let euler_feed = Address::repeat_byte(0x33);
+    let registrations = vec![
+        FeedRegistration {
+            id: FeedId::new("morpho-weth-usdc"),
+            proxy: morpho_oracle,
+            label: Some("Morpho WETH/USDC".to_string()),
+            base: Some("WETH".to_string()),
+            quote: Some("USDC".to_string()),
+            staleness: StalenessPolicy::max_age(3600),
+            current_aggregator: Some(aggregator),
+            aggregator_layout: None,
+            metadata: metadata(36, "Morpho WETH/USDC"),
+            source: FeedSource::morpho_chainlink_v2(
+                morpho_oracle,
+                I256::unchecked_from(1_i64),
+                I256::unchecked_from(1_i64),
+                I256::unchecked_from(1_i64),
+                vec![MorphoChainlinkFeed::new(
+                    MorphoChainlinkFeedRole::BaseFeed1,
+                    OracleDependency::new(
+                        morpho_feed,
+                        aggregator,
+                        I256::unchecked_from(200_000_000_i64),
+                    ),
+                )],
+            ),
+        },
+        FeedRegistration {
+            id: FeedId::new("euler-weth-usdc"),
+            proxy: euler_oracle,
+            label: Some("Euler WETH/USDC".to_string()),
+            base: Some("WETH".to_string()),
+            quote: Some("USDC".to_string()),
+            staleness: StalenessPolicy::max_age(3600),
+            current_aggregator: Some(aggregator),
+            aggregator_layout: None,
+            metadata: metadata(6, "Euler WETH/USDC"),
+            source: FeedSource::euler_quote(
+                euler_oracle,
+                base,
+                quote,
+                18,
+                6,
+                EulerQuoteLeg::Chainlink {
+                    oracle: euler_oracle,
+                    feed: euler_feed,
+                    aggregator,
+                    answer: I256::unchecked_from(200_000_000_i64),
+                    feed_decimals: 8,
+                    inverse: false,
+                    quote_decimals: 6,
+                },
+            ),
+        },
+    ];
+    let handler = OracleReactiveHandler::new(registrations);
+    assert_eq!(
+        handler.interests().len(),
+        1,
+        "shared Morpho/Euler dependency should produce one AnswerUpdated interest"
+    );
+
+    let log = rpc_log(
+        aggregator,
+        vec![
+            ANSWER_UPDATED_TOPIC,
+            int_topic(I256::unchecked_from(300_000_000_i64)),
+            uint_topic(U256::from(10_u64)),
+        ],
+        word(U256::from(1_700_000_020_u64)),
+        121,
+        3,
+    );
+    let outcome = handler
+        .handle_for_test(&context(121, 3), &ReactiveInput::Log(log))
+        .expect("handler outcome");
+    let mut updates = price_update_hooks(&outcome);
+    updates.sort_by_key(|update| update.id.as_str().to_string());
+
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0].id.as_str(), "euler-weth-usdc");
+    assert_eq!(updates[0].raw_answer, I256::unchecked_from(3_000_000_i64));
+    assert_eq!(updates[1].id.as_str(), "morpho-weth-usdc");
+    assert_eq!(updates[1].raw_answer, I256::unchecked_from(300_000_000_i64));
 }
 
 #[cfg(feature = "morpho")]

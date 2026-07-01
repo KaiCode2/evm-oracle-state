@@ -1,7 +1,11 @@
-use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use alloy_network::Ethereum;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, I256, U256};
 use alloy_rpc_types_eth::Filter;
 use evm_fork_cache::{
     StateView,
@@ -14,19 +18,49 @@ use evm_fork_cache::{
 };
 
 use crate::{
-    ANSWER_UPDATED_TOPIC, FeedRegistration, OCR1_NEW_TRANSMISSION_TOPIC,
+    ANSWER_UPDATED_TOPIC, AnswerUpdated, FeedRegistration, OCR1_NEW_TRANSMISSION_TOPIC,
     OCR2_NEW_TRANSMISSION_TOPIC, ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE,
-    Ocr1TransmissionStorageUpdate, Ocr2TransmissionStorageUpdate, OraclePriceUpdate,
-    OracleSignalKind, OracleSnapshotStatus, OracleStorageEffect, OracleStorageSync, OracleUpdate,
-    RoundData, decode_answer_updated, decode_ocr1_new_transmission, decode_ocr2_new_transmission,
+    Ocr1NewTransmission, Ocr1TransmissionStorageUpdate, Ocr2NewTransmission,
+    Ocr2TransmissionStorageUpdate, OraclePriceUpdate, OracleSignalKind, OracleSnapshotStatus,
+    OracleStorageEffect, OracleStorageError, OracleStorageSync, OracleUpdate, RoundData,
+    decode_answer_updated, decode_ocr1_new_transmission, decode_ocr2_new_transmission,
 };
 
 const HANDLER_ID: &str = "evm-oracle-state.chainlink";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct OracleDependencyKey {
+    aggregator: Address,
+    event: OracleDependencyEvent,
+}
+
+impl OracleDependencyKey {
+    fn new(aggregator: Address, event: OracleDependencyEvent) -> Self {
+        Self { aggregator, event }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum OracleDependencyEvent {
+    AnswerUpdated,
+    Ocr1NewTransmission,
+    Ocr2NewTransmission,
+}
+
+impl OracleDependencyEvent {
+    fn topic(self) -> B256 {
+        match self {
+            Self::AnswerUpdated => ANSWER_UPDATED_TOPIC,
+            Self::Ocr1NewTransmission => OCR1_NEW_TRANSMISSION_TOPIC,
+            Self::Ocr2NewTransmission => OCR2_NEW_TRANSMISSION_TOPIC,
+        }
+    }
+}
+
 /// Reactive-runtime bridge for Chainlink-compatible oracle feeds.
 #[derive(Clone, Debug)]
 pub struct OracleReactiveHandler {
-    registrations_by_aggregator: BTreeMap<Address, Vec<FeedRegistration>>,
+    registrations_by_dependency: BTreeMap<OracleDependencyKey, Vec<FeedRegistration>>,
     storage_sync: OracleStorageSync,
 }
 
@@ -41,24 +75,60 @@ impl OracleReactiveHandler {
         registrations: Vec<FeedRegistration>,
         storage_sync: OracleStorageSync,
     ) -> Self {
-        let mut registrations_by_aggregator: BTreeMap<Address, Vec<FeedRegistration>> =
+        let mut registrations_by_dependency: BTreeMap<OracleDependencyKey, Vec<FeedRegistration>> =
             BTreeMap::new();
         for registration in registrations {
             if !registration.source.uses_builtin_chainlink_handler() {
                 continue;
             }
+            let mut seen_dependencies = BTreeSet::new();
             for aggregator in registration
                 .source
                 .event_aggregators(registration.current_aggregator)
             {
-                registrations_by_aggregator
-                    .entry(aggregator)
-                    .or_default()
-                    .push(registration.clone());
+                let wants_answer = registration
+                    .source
+                    .wants_answer_updated_from(registration.current_aggregator, aggregator);
+                let wants_ocr2 =
+                    !wants_answer && storage_sync.prefers_ocr2_new_transmission(&registration);
+                let wants_ocr1 =
+                    !wants_answer && storage_sync.prefers_ocr1_new_transmission(&registration);
+                let wants_answer = wants_answer || (!wants_ocr2 && !wants_ocr1);
+
+                if wants_answer {
+                    insert_dependency_registration(
+                        &mut registrations_by_dependency,
+                        &mut seen_dependencies,
+                        OracleDependencyKey::new(aggregator, OracleDependencyEvent::AnswerUpdated),
+                        &registration,
+                    );
+                }
+                if wants_ocr1 {
+                    insert_dependency_registration(
+                        &mut registrations_by_dependency,
+                        &mut seen_dependencies,
+                        OracleDependencyKey::new(
+                            aggregator,
+                            OracleDependencyEvent::Ocr1NewTransmission,
+                        ),
+                        &registration,
+                    );
+                }
+                if wants_ocr2 {
+                    insert_dependency_registration(
+                        &mut registrations_by_dependency,
+                        &mut seen_dependencies,
+                        OracleDependencyKey::new(
+                            aggregator,
+                            OracleDependencyEvent::Ocr2NewTransmission,
+                        ),
+                        &registration,
+                    );
+                }
             }
         }
         Self {
-            registrations_by_aggregator,
+            registrations_by_dependency,
             storage_sync,
         }
     }
@@ -70,47 +140,10 @@ impl OracleReactiveHandler {
 
     /// Interests for current aggregators.
     pub fn interests(&self) -> Vec<ReactiveInterest<Ethereum>> {
-        let mut interests = Vec::new();
-        for (aggregator, registrations) in &self.registrations_by_aggregator {
-            let wants_ocr2 = registrations.iter().any(|registration| {
-                !registration
-                    .source
-                    .wants_answer_updated_from(registration.current_aggregator, *aggregator)
-                    && self
-                        .storage_sync
-                        .prefers_ocr2_new_transmission(registration)
-            });
-            let wants_ocr1 = registrations.iter().any(|registration| {
-                !registration
-                    .source
-                    .wants_answer_updated_from(registration.current_aggregator, *aggregator)
-                    && self
-                        .storage_sync
-                        .prefers_ocr1_new_transmission(registration)
-            });
-            let wants_answer = registrations.iter().any(|registration| {
-                registration
-                    .source
-                    .wants_answer_updated_from(registration.current_aggregator, *aggregator)
-                    || (!self
-                        .storage_sync
-                        .prefers_ocr2_new_transmission(registration)
-                        && !self
-                            .storage_sync
-                            .prefers_ocr1_new_transmission(registration))
-            });
-
-            if wants_answer {
-                interests.push(log_interest(*aggregator, ANSWER_UPDATED_TOPIC));
-            }
-            if wants_ocr1 {
-                interests.push(log_interest(*aggregator, OCR1_NEW_TRANSMISSION_TOPIC));
-            }
-            if wants_ocr2 {
-                interests.push(log_interest(*aggregator, OCR2_NEW_TRANSMISSION_TOPIC));
-            }
-        }
-        interests
+        self.registrations_by_dependency
+            .keys()
+            .map(|key| log_interest(key.aggregator, key.event.topic()))
+            .collect()
     }
 
     /// Test helper that avoids requiring callers to construct a cache view.
@@ -129,7 +162,8 @@ impl OracleReactiveHandler {
         state: &dyn StateView,
     ) -> Result<HandlerOutcome, HandlerError> {
         let aggregator = log.address();
-        let Some(registrations) = self.registrations_by_aggregator.get(&aggregator) else {
+        let key = OracleDependencyKey::new(aggregator, OracleDependencyEvent::AnswerUpdated);
+        let Some(registrations) = self.registrations_by_dependency.get(&key) else {
             return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
         };
 
@@ -146,24 +180,26 @@ impl OracleReactiveHandler {
         let mut effects = Vec::new();
         let mut tags = Vec::new();
         let mut needs_aggregator_purge = false;
-        let mut handled_any = false;
+
+        apply_answer_updated_dependency_storage_effect(
+            &self.storage_sync,
+            &mut effects,
+            &mut needs_aggregator_purge,
+            registrations,
+            &event,
+            block_number,
+            block_hash,
+            log_index,
+            if log.removed {
+                OracleSnapshotStatus::Unknown
+            } else {
+                OracleSnapshotStatus::EventPending
+            },
+            state,
+        )
+        .map_err(|error| HandlerError::new(format!("{error}")))?;
 
         for registration in registrations {
-            let wants_answer = registration
-                .source
-                .wants_answer_updated_from(registration.current_aggregator, aggregator);
-            if !wants_answer
-                && (self
-                    .storage_sync
-                    .prefers_ocr2_new_transmission(registration)
-                    || self
-                        .storage_sync
-                        .prefers_ocr1_new_transmission(registration))
-            {
-                continue;
-            }
-            handled_any = true;
-
             let normalized_answer = registration
                 .source
                 .normalize_answer_from_event(Some(aggregator), event.current);
@@ -181,49 +217,22 @@ impl OracleReactiveHandler {
                 block_number,
                 log_index,
             };
-            let raw_storage_update = OraclePriceUpdate {
-                id: registration.id,
-                proxy: registration.proxy,
+            let raw_storage_update = answer_updated_price_update(
+                registration,
                 aggregator,
-                label: registration.label.clone(),
-                base: registration.base.clone(),
-                quote: registration.quote.clone(),
-                raw_answer: event.current,
-                decimals: registration.metadata.decimals,
-                event_round_id: event.round_id,
-                started_at: event.updated_at,
-                updated_at: event.updated_at,
+                &event,
+                event.current,
                 block_number,
                 block_hash,
                 log_index,
-                confidence: if log.removed {
+                if log.removed {
                     OracleSnapshotStatus::Unknown
                 } else {
                     OracleSnapshotStatus::EventPending
                 },
-            };
+            );
             let mut price_update = raw_storage_update.clone();
             price_update.raw_answer = normalized_answer;
-            if registration
-                .source
-                .supports_direct_chainlink_storage_effects()
-            {
-                apply_storage_effect(
-                    &mut effects,
-                    &mut needs_aggregator_purge,
-                    registration.proxy,
-                    self.storage_sync
-                        .state_effect_for_answer(registration, &raw_storage_update, state)
-                        .map_err(|error| HandlerError::new(format!("{error}")))?,
-                );
-            } else {
-                apply_storage_effect(
-                    &mut effects,
-                    &mut needs_aggregator_purge,
-                    registration.proxy,
-                    OracleStorageEffect::FallbackPurge,
-                );
-            }
             let hook_tags = hook_tags(registration, aggregator);
             tags.extend(hook_tags.clone());
             if !log.removed {
@@ -242,9 +251,6 @@ impl OracleReactiveHandler {
             }));
         }
 
-        if !handled_any {
-            return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
-        }
         prepend_aggregator_purge(&mut effects, needs_aggregator_purge, aggregator);
 
         Ok(HandlerOutcome {
@@ -261,7 +267,8 @@ impl OracleReactiveHandler {
         state: &dyn StateView,
     ) -> Result<HandlerOutcome, HandlerError> {
         let aggregator = log.address();
-        let Some(registrations) = self.registrations_by_aggregator.get(&aggregator) else {
+        let key = OracleDependencyKey::new(aggregator, OracleDependencyEvent::Ocr2NewTransmission);
+        let Some(registrations) = self.registrations_by_dependency.get(&key) else {
             return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
         };
 
@@ -287,53 +294,39 @@ impl OracleReactiveHandler {
         let mut effects = Vec::new();
         let mut tags = Vec::new();
         let mut needs_aggregator_purge = false;
-        let mut handled_any = false;
+
+        let transmission_update = Ocr2TransmissionStorageUpdate {
+            aggregator,
+            aggregator_round_id: event.aggregator_round_id,
+            answer: event.answer,
+            observations_timestamp: event.observations_timestamp,
+            transmission_timestamp,
+            epoch_and_round: event.epoch_and_round,
+        };
+        apply_ocr2_dependency_storage_effect(
+            &self.storage_sync,
+            &mut effects,
+            &mut needs_aggregator_purge,
+            registrations,
+            &transmission_update,
+            state,
+        )
+        .map_err(|error| HandlerError::new(format!("{error}")))?;
 
         for registration in registrations {
-            if !self
-                .storage_sync
-                .prefers_ocr2_new_transmission(registration)
-            {
-                continue;
-            }
-            handled_any = true;
-
-            let price_update = OraclePriceUpdate {
-                id: registration.id,
-                proxy: registration.proxy,
+            let price_update = ocr2_price_update(
+                registration,
                 aggregator,
-                label: registration.label.clone(),
-                base: registration.base.clone(),
-                quote: registration.quote.clone(),
-                raw_answer: registration.source.normalize_answer(event.answer),
-                decimals: registration.metadata.decimals,
-                event_round_id: event.aggregator_round_id,
-                started_at: event.observations_timestamp,
-                updated_at: transmission_timestamp,
+                &event,
+                transmission_timestamp,
                 block_number,
                 block_hash,
                 log_index,
-                confidence: if log.removed {
+                if log.removed {
                     OracleSnapshotStatus::Unknown
                 } else {
                     OracleSnapshotStatus::EventPending
                 },
-            };
-            let transmission_update = Ocr2TransmissionStorageUpdate {
-                aggregator,
-                aggregator_round_id: event.aggregator_round_id,
-                answer: event.answer,
-                observations_timestamp: event.observations_timestamp,
-                transmission_timestamp,
-                epoch_and_round: event.epoch_and_round,
-            };
-            apply_storage_effect(
-                &mut effects,
-                &mut needs_aggregator_purge,
-                registration.proxy,
-                self.storage_sync
-                    .state_effect_for_ocr2_transmission(registration, &transmission_update, state)
-                    .map_err(|error| HandlerError::new(format!("{error}")))?,
             );
             let hook_tags = hook_tags(registration, aggregator);
             tags.extend(hook_tags.clone());
@@ -345,9 +338,6 @@ impl OracleReactiveHandler {
             }));
         }
 
-        if !handled_any {
-            return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
-        }
         prepend_aggregator_purge(&mut effects, needs_aggregator_purge, aggregator);
 
         Ok(HandlerOutcome {
@@ -364,7 +354,8 @@ impl OracleReactiveHandler {
         state: &dyn StateView,
     ) -> Result<HandlerOutcome, HandlerError> {
         let aggregator = log.address();
-        let Some(registrations) = self.registrations_by_aggregator.get(&aggregator) else {
+        let key = OracleDependencyKey::new(aggregator, OracleDependencyEvent::Ocr1NewTransmission);
+        let Some(registrations) = self.registrations_by_dependency.get(&key) else {
             return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
         };
 
@@ -390,52 +381,38 @@ impl OracleReactiveHandler {
         let mut effects = Vec::new();
         let mut tags = Vec::new();
         let mut needs_aggregator_purge = false;
-        let mut handled_any = false;
+
+        let transmission_update = Ocr1TransmissionStorageUpdate {
+            aggregator,
+            aggregator_round_id: event.aggregator_round_id,
+            answer: event.answer,
+            transmission_timestamp,
+            epoch_and_round: event.epoch_and_round,
+        };
+        apply_ocr1_dependency_storage_effect(
+            &self.storage_sync,
+            &mut effects,
+            &mut needs_aggregator_purge,
+            registrations,
+            &transmission_update,
+            state,
+        )
+        .map_err(|error| HandlerError::new(format!("{error}")))?;
 
         for registration in registrations {
-            if !self
-                .storage_sync
-                .prefers_ocr1_new_transmission(registration)
-            {
-                continue;
-            }
-            handled_any = true;
-
-            let price_update = OraclePriceUpdate {
-                id: registration.id,
-                proxy: registration.proxy,
+            let price_update = ocr1_price_update(
+                registration,
                 aggregator,
-                label: registration.label.clone(),
-                base: registration.base.clone(),
-                quote: registration.quote.clone(),
-                raw_answer: registration.source.normalize_answer(event.answer),
-                decimals: registration.metadata.decimals,
-                event_round_id: event.aggregator_round_id,
-                started_at: transmission_timestamp,
-                updated_at: transmission_timestamp,
+                &event,
+                transmission_timestamp,
                 block_number,
                 block_hash,
                 log_index,
-                confidence: if log.removed {
+                if log.removed {
                     OracleSnapshotStatus::Unknown
                 } else {
                     OracleSnapshotStatus::EventPending
                 },
-            };
-            let transmission_update = Ocr1TransmissionStorageUpdate {
-                aggregator,
-                aggregator_round_id: event.aggregator_round_id,
-                answer: event.answer,
-                transmission_timestamp,
-                epoch_and_round: event.epoch_and_round,
-            };
-            apply_storage_effect(
-                &mut effects,
-                &mut needs_aggregator_purge,
-                registration.proxy,
-                self.storage_sync
-                    .state_effect_for_ocr1_transmission(registration, &transmission_update, state)
-                    .map_err(|error| HandlerError::new(format!("{error}")))?,
             );
             let hook_tags = hook_tags(registration, aggregator);
             tags.extend(hook_tags.clone());
@@ -447,9 +424,6 @@ impl OracleReactiveHandler {
             }));
         }
 
-        if !handled_any {
-            return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
-        }
         prepend_aggregator_purge(&mut effects, needs_aggregator_purge, aggregator);
 
         Ok(HandlerOutcome {
@@ -457,6 +431,20 @@ impl OracleReactiveHandler {
             quality: StateEffectQuality::RequiresRepair,
             tags,
         })
+    }
+}
+
+fn insert_dependency_registration(
+    registrations_by_dependency: &mut BTreeMap<OracleDependencyKey, Vec<FeedRegistration>>,
+    seen_dependencies: &mut BTreeSet<OracleDependencyKey>,
+    key: OracleDependencyKey,
+    registration: &FeedRegistration,
+) {
+    if seen_dependencies.insert(key) {
+        registrations_by_dependency
+            .entry(key)
+            .or_default()
+            .push(registration.clone());
     }
 }
 
@@ -468,25 +456,140 @@ fn log_interest(aggregator: Address, topic: B256) -> ReactiveInterest<Ethereum> 
     })
 }
 
-fn apply_storage_effect(
+fn apply_answer_updated_dependency_storage_effect(
+    storage_sync: &OracleStorageSync,
     effects: &mut Vec<ReactiveEffect>,
     needs_aggregator_purge: &mut bool,
-    proxy: Address,
-    effect: OracleStorageEffect,
-) {
+    registrations: &[FeedRegistration],
+    event: &AnswerUpdated,
+    block_number: Option<u64>,
+    block_hash: Option<B256>,
+    log_index: Option<u64>,
+    confidence: OracleSnapshotStatus,
+    state: &dyn StateView,
+) -> Result<(), OracleStorageError> {
+    let mut direct_candidates = Vec::new();
+    let mut fallback_proxies = BTreeSet::new();
+
+    for registration in registrations {
+        if registration
+            .source
+            .supports_direct_chainlink_storage_effects()
+        {
+            direct_candidates.push(registration);
+        } else {
+            fallback_proxies.insert(registration.proxy);
+        }
+    }
+
+    let mut applied_direct_effect = false;
+    for registration in direct_candidates.iter().copied() {
+        let raw_update = answer_updated_price_update(
+            registration,
+            event.aggregator,
+            event,
+            event.current,
+            block_number,
+            block_hash,
+            log_index,
+            confidence,
+        );
+        if apply_state_updates(
+            effects,
+            storage_sync.state_effect_for_answer(registration, &raw_update, state)?,
+        ) {
+            applied_direct_effect = true;
+            break;
+        }
+    }
+
+    if !applied_direct_effect {
+        fallback_proxies.extend(
+            direct_candidates
+                .into_iter()
+                .map(|registration| registration.proxy),
+        );
+    }
+
+    append_fallback_invalidations(effects, needs_aggregator_purge, fallback_proxies);
+    Ok(())
+}
+
+fn apply_ocr2_dependency_storage_effect(
+    storage_sync: &OracleStorageSync,
+    effects: &mut Vec<ReactiveEffect>,
+    needs_aggregator_purge: &mut bool,
+    registrations: &[FeedRegistration],
+    update: &Ocr2TransmissionStorageUpdate,
+    state: &dyn StateView,
+) -> Result<(), OracleStorageError> {
+    let mut fallback_proxies = BTreeSet::new();
+
+    for registration in registrations {
+        if apply_state_updates(
+            effects,
+            storage_sync.state_effect_for_ocr2_transmission(registration, update, state)?,
+        ) {
+            return Ok(());
+        }
+        fallback_proxies.insert(registration.proxy);
+    }
+
+    append_fallback_invalidations(effects, needs_aggregator_purge, fallback_proxies);
+    Ok(())
+}
+
+fn apply_ocr1_dependency_storage_effect(
+    storage_sync: &OracleStorageSync,
+    effects: &mut Vec<ReactiveEffect>,
+    needs_aggregator_purge: &mut bool,
+    registrations: &[FeedRegistration],
+    update: &Ocr1TransmissionStorageUpdate,
+    state: &dyn StateView,
+) -> Result<(), OracleStorageError> {
+    let mut fallback_proxies = BTreeSet::new();
+
+    for registration in registrations {
+        if apply_state_updates(
+            effects,
+            storage_sync.state_effect_for_ocr1_transmission(registration, update, state)?,
+        ) {
+            return Ok(());
+        }
+        fallback_proxies.insert(registration.proxy);
+    }
+
+    append_fallback_invalidations(effects, needs_aggregator_purge, fallback_proxies);
+    Ok(())
+}
+
+fn apply_state_updates(effects: &mut Vec<ReactiveEffect>, effect: OracleStorageEffect) -> bool {
     match effect {
         OracleStorageEffect::StateUpdates { updates, .. } => {
             effects.extend(updates.into_iter().map(ReactiveEffect::StateUpdate));
+            true
         }
-        OracleStorageEffect::FallbackPurge => {
-            *needs_aggregator_purge = true;
-            effects.push(ReactiveEffect::Invalidate(InvalidationRequest {
-                scope: PurgeScope::AllStorage,
-                address: proxy,
-                reason: InvalidationReason::HandlerRequested,
-            }));
-        }
+        OracleStorageEffect::FallbackPurge => false,
     }
+}
+
+fn append_fallback_invalidations(
+    effects: &mut Vec<ReactiveEffect>,
+    needs_aggregator_purge: &mut bool,
+    proxies: BTreeSet<Address>,
+) {
+    if proxies.is_empty() {
+        return;
+    }
+
+    *needs_aggregator_purge = true;
+    effects.extend(proxies.into_iter().map(|proxy| {
+        ReactiveEffect::Invalidate(InvalidationRequest {
+            scope: PurgeScope::AllStorage,
+            address: proxy,
+            reason: InvalidationReason::HandlerRequested,
+        })
+    }));
 }
 
 fn prepend_aggregator_purge(
@@ -503,6 +606,97 @@ fn prepend_aggregator_purge(
                 reason: InvalidationReason::HandlerRequested,
             }),
         );
+    }
+}
+
+fn answer_updated_price_update(
+    registration: &FeedRegistration,
+    aggregator: Address,
+    event: &AnswerUpdated,
+    raw_answer: I256,
+    block_number: Option<u64>,
+    block_hash: Option<B256>,
+    log_index: Option<u64>,
+    confidence: OracleSnapshotStatus,
+) -> OraclePriceUpdate {
+    OraclePriceUpdate {
+        id: registration.id,
+        proxy: registration.proxy,
+        aggregator,
+        label: registration.label.clone(),
+        base: registration.base.clone(),
+        quote: registration.quote.clone(),
+        raw_answer,
+        decimals: registration.metadata.decimals,
+        event_round_id: event.round_id,
+        started_at: event.updated_at,
+        updated_at: event.updated_at,
+        block_number,
+        block_hash,
+        log_index,
+        confidence,
+    }
+}
+
+fn ocr2_price_update(
+    registration: &FeedRegistration,
+    aggregator: Address,
+    event: &Ocr2NewTransmission,
+    transmission_timestamp: u64,
+    block_number: Option<u64>,
+    block_hash: Option<B256>,
+    log_index: Option<u64>,
+    confidence: OracleSnapshotStatus,
+) -> OraclePriceUpdate {
+    OraclePriceUpdate {
+        id: registration.id,
+        proxy: registration.proxy,
+        aggregator,
+        label: registration.label.clone(),
+        base: registration.base.clone(),
+        quote: registration.quote.clone(),
+        raw_answer: registration
+            .source
+            .normalize_answer_from_event(Some(aggregator), event.answer),
+        decimals: registration.metadata.decimals,
+        event_round_id: event.aggregator_round_id,
+        started_at: event.observations_timestamp,
+        updated_at: transmission_timestamp,
+        block_number,
+        block_hash,
+        log_index,
+        confidence,
+    }
+}
+
+fn ocr1_price_update(
+    registration: &FeedRegistration,
+    aggregator: Address,
+    event: &Ocr1NewTransmission,
+    transmission_timestamp: u64,
+    block_number: Option<u64>,
+    block_hash: Option<B256>,
+    log_index: Option<u64>,
+    confidence: OracleSnapshotStatus,
+) -> OraclePriceUpdate {
+    OraclePriceUpdate {
+        id: registration.id,
+        proxy: registration.proxy,
+        aggregator,
+        label: registration.label.clone(),
+        base: registration.base.clone(),
+        quote: registration.quote.clone(),
+        raw_answer: registration
+            .source
+            .normalize_answer_from_event(Some(aggregator), event.answer),
+        decimals: registration.metadata.decimals,
+        event_round_id: event.aggregator_round_id,
+        started_at: transmission_timestamp,
+        updated_at: transmission_timestamp,
+        block_number,
+        block_hash,
+        log_index,
+        confidence,
     }
 }
 

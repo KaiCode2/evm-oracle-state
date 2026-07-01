@@ -115,6 +115,62 @@ The cache policy is intentionally conservative:
 - Raw EVM storage is purged/refetched unless a detected layout adapter supports
   the feed.
 
+## Dependency-Aware Reactive Routing
+
+`OracleReactiveHandler` routes logs through an internal dependency key:
+
+```text
+(aggregator address, event family)
+```
+
+The event family is one of:
+
+- `AnswerUpdated`
+- OCR1 `NewTransmission`
+- OCR2 `NewTransmission`
+
+This is the first compatibility layer of the dependency-graph model. The public
+registration APIs still describe user-facing feeds, but the reactive handler
+groups those feeds by their underlying Chainlink event dependency before it
+builds log interests or handles events.
+
+That gives three distinct stages:
+
+```text
+Feed registrations
+  -> dependency keys
+  -> one log interest per dependency key
+  -> one dependency-level cache effect per event
+  -> one normalized OraclePriceUpdate hook per affected feed
+```
+
+For example, if a Morpho oracle and an Euler oracle both depend on the same
+ETH/USD Chainlink aggregator, the handler subscribes once to the underlying
+ETH/USD event. When the event lands, direct Chainlink storage sync, if available,
+is applied once to that underlying aggregator state. The runtime then fans out
+typed hooks to each user-facing oracle:
+
+```text
+ETH/USD NewTransmission
+  -> one OCR storage write set for ETH/USD
+  -> Euler WETH/USD OraclePriceUpdate
+  -> Morpho WETH/USDC OraclePriceUpdate
+```
+
+The hooks remain feed-specific. Each registration still applies its own
+normalization:
+
+- Plain Chainlink feeds use the raw Chainlink answer.
+- Aave capped or composed adapters apply the Aave source transform.
+- Morpho Chainlink V2 sources recompute the 36-decimal Morpho `price()`.
+- Euler quote and cross adapters recompute the requested quote output.
+
+Fallback behavior is still conservative. If no verified OCR1/OCR2 storage layout
+can produce exact cache writes, the handler keeps the existing aggregator/proxy
+purge path. Wrapper contracts such as Aave, Morpho, and Euler are not written
+directly unless a dedicated, verified adapter exists; they are updated through
+typed state and read overlays.
+
 ## Direct Chainlink Storage Sync
 
 For detected Chainlink OCR1 and OCR2 aggregators, callers get event-derived cache
@@ -346,7 +402,8 @@ built-in Chainlink-compatible handler.
   immediately using the seeded companion dependency answer, and event-specific
   reconciliation reads both dependency proxies before confirming or correcting
   the derived price. Rebuild the reactive handler after reconciliation to
-  refresh dependency routing; a later stateful dependency graph can remove that
+  refresh dependency routing; the current dependency-aware handler is internal
+  and stateless, so a later stateful graph is still needed to remove that
   limitation.
 - Direct storage writes are limited to detected OCR1/OCR2 layouts; unsupported
   or unknown layouts fall back to purge/refetch.
@@ -355,6 +412,9 @@ built-in Chainlink-compatible handler.
 - No trading, liquidation, or transaction submission behavior.
 - Aggregator routing is best effort and should be rebuilt after reconciliation
   reports aggregator changes.
+- Derived recomputation is still compatibility-eager for registered feeds. The
+  next graph phase can add explicit hook/overlay/snapshot demand so unused
+  derived feeds do not recompute.
 
 ## Demos
 
