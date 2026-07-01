@@ -63,6 +63,12 @@ aggregator changes, and post-reorg safety still use
   and one-level `CrossAdapter` sources composed from those legs. Chainlink
   dependency events recompute the user-facing quote immediately, and
   `OracleReadOverlay` can serve `getQuote(...)` / `getQuotes(...)`.
+- With the `redstone` feature, use `RedstoneOracleAdapter` and `RedstoneFeed`
+  to register RedStone push price-feed wrappers. Discovery reads
+  `getDataFeedId()`, `getPriceFeedAdapter()`, Chainlink-shaped metadata, and
+  `latestRoundData()` through `EvmCache::call_sol`; live handling subscribes to
+  multi-feed `ValueUpdate(uint256,bytes32,uint256)` adapter logs and merged
+  Chainlink-shaped `AnswerUpdated` logs from the price-feed address.
 - Queue event-specific, block-identified proxy reconciliation requests after
   committed price updates.
 - Serve simulation-facing `latestRoundData()`, `decimals()`, `description()`,
@@ -94,6 +100,8 @@ features currently add focused surfaces:
 - `aave`: enables `AaveV3OracleAdapter` and `AaveAsset` discovery helpers.
 - `morpho`: enables Morpho Blue oracle discovery helpers.
 - `euler`: enables Euler quote-oracle discovery helpers.
+- `redstone`: enables RedStone push-feed discovery helpers, event decoding, and
+  `RedstoneReactiveHandler`.
 - `live-tests`: enables websocket dependencies used by RPC-gated live tests.
 
 ## Event to Simulation Flow
@@ -106,6 +114,18 @@ AnswerUpdated, OCR1 NewTransmission, or OCR2 NewTransmission log
   -> OracleReadOverlay serves registered oracle view calls from typed state
   -> OracleReconciler reads the proxy latestRoundData()
   -> snapshot becomes Confirmed, Corrected, Stale, or Invalid
+```
+
+With `--features redstone`, RedStone push feeds follow the same hook and tracker
+path:
+
+```text
+RedStone ValueUpdate or merged AnswerUpdated log
+  -> RedstoneReactiveHandler decodes and filters the event
+  -> OraclePriceUpdate hook is emitted immediately
+  -> OracleTracker stores an EventPending snapshot
+  -> OracleReadOverlay serves latestRoundData() from typed state
+  -> RedStone price-feed wrapper and adapter storage are purged/refetched
 ```
 
 The cache policy is intentionally conservative:
@@ -453,6 +473,7 @@ ETH_RPC_URL=https://example-rpc.invalid cargo run --example chainlink_live_probe
 ETH_RPC_URL=https://example-rpc.invalid SMOKE_DURATION_SECS=600 cargo run --example chainlink_reactive_smoke
 ETH_RPC_URL=https://example-http-rpc.invalid ETH_WS_RPC_URL=wss://example-ws-rpc.invalid AAVE_DEMO_DURATION_SECS=600 cargo run --features aave --example aave_v3_health_factor -- 0xcc144c2e9fc40f92257b2cd7cc43e1f82666f09a
 ETH_RPC_URL=https://example-http-rpc.invalid ETH_WS_RPC_URL=wss://example-ws-rpc.invalid MORPHO_MARKET_ID=0x... EULER_ORACLE=0x... EULER_BASE=0x... EULER_QUOTE=0x... cargo run --features morpho,euler --example morpho_euler_reactive_value
+ETH_RPC_URL=https://example-http-rpc.invalid ETH_WS_RPC_URL=wss://example-ws-rpc.invalid REDSTONE_PRICE_FEED=0x... cargo run --features redstone --example redstone_push_demo
 ```
 
 When `ETH_RPC_URL` is unset, live examples exit successfully without making
@@ -483,3 +504,14 @@ live `OraclePriceUpdate` hooks. The Morpho calculation uses the market LLTV; the
 Euler calculation uses `EULER_LTV_WAD` because exact Euler account health is
 vault/controller specific. When `ETH_WS_RPC_URL` is unset, the example derives a
 websocket URL from `ETH_RPC_URL` by replacing `https://` with `wss://`.
+
+`redstone_push_demo` is a cache-backed RedStone push-feed demo. It cold-starts
+from `EvmCache`, installs `RedstoneOracleAdapter`, prints discovered feed state,
+registers RedStone log interests with `AlloySubscriber`, and prints live
+`OraclePriceUpdate` hooks as they arrive. Required env: `ETH_RPC_URL` and
+`REDSTONE_PRICE_FEED`. Optional env: `ETH_WS_RPC_URL`/`WS_RPC_URL`,
+`REDSTONE_ADAPTER`, `REDSTONE_DATA_FEED_ID`, `REDSTONE_FEED_ID`,
+`REDSTONE_LABEL`, `REDSTONE_BASE`, `REDSTONE_QUOTE`, `REDSTONE_MAX_AGE_SECS`,
+`REDSTONE_DEMO_DURATION_SECS`, and `REDSTONE_DEMO_IDLE_TIMEOUT_SECS`. When no
+explicit websocket URL is set, the example derives one from `ETH_RPC_URL` by
+replacing `https://` with `wss://` or `http://` with `ws://`.

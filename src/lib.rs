@@ -21,6 +21,8 @@ mod overlay;
 mod price;
 mod provider;
 mod reactive;
+#[cfg(feature = "redstone")]
+mod redstone;
 mod registry;
 mod runtime;
 mod signal;
@@ -49,6 +51,8 @@ pub use events::{
     OCR2_NEW_TRANSMISSION_TOPIC, Ocr1NewTransmission, Ocr2NewTransmission, decode_answer_updated,
     decode_new_round, decode_ocr1_new_transmission, decode_ocr2_new_transmission,
 };
+#[cfg(feature = "redstone")]
+pub use events::{REDSTONE_VALUE_UPDATE_TOPIC, RedstoneValueUpdate, decode_redstone_value_update};
 pub use feed::{Feed, FeedAccess, FeedBuilder, FeedBuilderState, FeedReady};
 pub use layout::{
     AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence,
@@ -60,6 +64,8 @@ pub use overlay::OracleReadOverlay;
 pub use price::{CheckedPrice, OraclePrice, PricePolicy};
 pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
 pub use reactive::OracleReactiveHandler;
+#[cfg(feature = "redstone")]
+pub use redstone::{RedstoneFeed, RedstoneOracleAdapter, RedstoneReactiveHandler};
 pub use registry::{
     AggregatorChange, EulerQuoteLeg, FeedId, FeedRegistration, FeedSource, MorphoChainlinkFeed,
     MorphoChainlinkFeedRole, OracleDependency, OracleRegistry,

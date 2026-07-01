@@ -23,6 +23,7 @@ default = []
 aave = []
 morpho = []
 euler = []
+redstone = []
 live-tests = ["alloy-provider/ws"]
 
 [dependencies]
