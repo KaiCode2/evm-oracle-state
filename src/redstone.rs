@@ -6,11 +6,11 @@ use std::{
 };
 
 use alloy_network::Ethereum;
-use alloy_primitives::{Address, B256, I256, U256};
+use alloy_primitives::{Address, B256, I256, U256, keccak256};
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::sol;
 use evm_fork_cache::{
-    StateView,
+    StateUpdate, StateView,
     cache::EvmCache,
     reactive::{
         ChainStatus, HandlerError, HandlerId, HandlerOutcome, HookSignal, InvalidationReason,
@@ -42,6 +42,25 @@ use RedstonePriceFeedInterface::{getDataFeedIdCall, getPriceFeedAdapterCall};
 const ADAPTER_ID: &str = "evm-oracle-state.redstone";
 const HANDLER_ID: &str = "evm-oracle-state.redstone";
 const REDSTONE_NO_ROUNDS_ROUND_ID: u64 = 1;
+const REDSTONE_MULTI_FEED_DATA_FEEDS_STORAGE_LOCATION: B256 =
+    alloy_primitives::b256!("5e9fb4cb0eb3c2583734d3394f30bb14b241acb9b3a034f7e7ba1a62db4370f1");
+const REDSTONE_PRICE_FEEDS_VALUES_MAPPING_STORAGE_LOCATION: B256 =
+    alloy_primitives::b256!("4dd0c77efa6f6d590c97573d8c70b714546e7311202ff7c11c484cc841d91bfc");
+const REDSTONE_PRICE_FEEDS_LATEST_UPDATE_TIMESTAMPS_STORAGE_LOCATION: B256 =
+    alloy_primitives::b256!("3d01e4d77237ea0f771f1786da4d4ff757fcba6a92933aa53b1dcef2d6bd6fe2");
+const REDSTONE_PRICE_FEEDS_WITH_ROUNDS_ROUND_TIMESTAMPS_MAPPING_STORAGE_LOCATION: B256 =
+    alloy_primitives::b256!("207e00944d909d1224f0c253d58489121d736649f8393199f55eecf4f0cf3eb0");
+const REDSTONE_PRICE_FEEDS_WITH_ROUNDS_LATEST_ROUND_ID_STORAGE_LOCATION: B256 =
+    alloy_primitives::b256!("c68d7f1ee07d8668991a8951e720010c9d44c2f11c06b5cac61fbc4083263938");
+const REDSTONE_DATA_TIMESTAMP_BITS: usize = 48;
+const REDSTONE_BLOCK_TIMESTAMP_BITS: usize = 48;
+const REDSTONE_MULTI_FEED_VALUE_BITS: usize = 152;
+const REDSTONE_MULTI_FEED_BLOCK_TIMESTAMP_OFFSET_BITS: usize = REDSTONE_DATA_TIMESTAMP_BITS;
+const REDSTONE_MULTI_FEED_VALUE_OFFSET_BITS: usize =
+    REDSTONE_DATA_TIMESTAMP_BITS + REDSTONE_BLOCK_TIMESTAMP_BITS;
+const REDSTONE_MULTI_FEED_IS_VALUE_BIGGER_OFFSET_BITS: usize =
+    REDSTONE_MULTI_FEED_VALUE_OFFSET_BITS + REDSTONE_MULTI_FEED_VALUE_BITS;
+const REDSTONE_PRICE_FEEDS_BLOCK_TIMESTAMP_OFFSET_BITS: usize = 128;
 
 /// Declarative RedStone push-feed registration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -310,6 +329,236 @@ impl OracleAdapterPlugin for RedstoneOracleAdapter {
     }
 }
 
+/// Storage helpers for RedStone `MultiFeedAdapterWithoutRounds` push feeds.
+///
+/// The live RedStone multi-feed adapter stores each feed in a packed
+/// `DataFeedDetails` word keyed by `dataFeedId`. A direct event write is only
+/// emitted when that packed slot is already hot in the cache. If the value does
+/// not fit the inline `uint152` field, the overflow slot must also be hot.
+#[derive(Clone, Debug, Default)]
+pub struct RedstoneMultiFeedStorageAdapter;
+
+impl RedstoneMultiFeedStorageAdapter {
+    /// Return the storage slot for `dataFeeds[dataFeedId]`.
+    pub fn data_feed_details_slot(data_feed_id: B256) -> U256 {
+        keyed_slot(
+            data_feed_id,
+            REDSTONE_MULTI_FEED_DATA_FEEDS_STORAGE_LOCATION,
+        )
+    }
+
+    /// Return the overflow slot for `dataFeeds[dataFeedId].biggerValue`.
+    pub fn bigger_value_slot(data_feed_id: B256) -> U256 {
+        Self::data_feed_details_slot(data_feed_id) + U256::from(1_u8)
+    }
+
+    /// Pack RedStone `DataFeedDetails`.
+    ///
+    /// RedStone's `ValueUpdate` event exposes one timestamp. The storage layout
+    /// keeps both data-package and block timestamps, so the event timestamp is
+    /// used for the block timestamp and `timestamp * 1000` is used for the
+    /// millisecond data timestamp.
+    pub fn pack_data_feed_details_from_event(value: U256, updated_at: u64) -> Option<U256> {
+        let data_timestamp_ms = updated_at.checked_mul(1_000)?;
+        Self::pack_data_feed_details(value, data_timestamp_ms, updated_at)
+    }
+
+    /// Pack RedStone `DataFeedDetails` with explicit timestamps.
+    pub fn pack_data_feed_details(
+        value: U256,
+        data_timestamp_ms: u64,
+        block_timestamp: u64,
+    ) -> Option<U256> {
+        if data_timestamp_ms > uint_mask_u64(REDSTONE_DATA_TIMESTAMP_BITS)
+            || block_timestamp > uint_mask_u64(REDSTONE_BLOCK_TIMESTAMP_BITS)
+        {
+            return None;
+        }
+
+        let inline_value = value & uint_mask(REDSTONE_MULTI_FEED_VALUE_BITS);
+        let is_value_bigger = if value > uint_mask(REDSTONE_MULTI_FEED_VALUE_BITS) {
+            U256::from(1_u8)
+        } else {
+            U256::ZERO
+        };
+
+        Some(
+            U256::from(data_timestamp_ms)
+                | (U256::from(block_timestamp) << REDSTONE_MULTI_FEED_BLOCK_TIMESTAMP_OFFSET_BITS)
+                | (inline_value << REDSTONE_MULTI_FEED_VALUE_OFFSET_BITS)
+                | (is_value_bigger << REDSTONE_MULTI_FEED_IS_VALUE_BIGGER_OFFSET_BITS),
+        )
+    }
+
+    fn state_updates_for_value_update(
+        adapter: Address,
+        event: &RedstoneValueUpdate,
+        state: &dyn StateView,
+    ) -> Option<Vec<StateUpdate>> {
+        let details_slot = Self::data_feed_details_slot(event.data_feed_id);
+        state.storage(adapter, details_slot)?;
+        let details = Self::pack_data_feed_details_from_event(event.value, event.updated_at)?;
+        let mut updates = vec![StateUpdate::slot(adapter, details_slot, details)];
+
+        if event.value > uint_mask(REDSTONE_MULTI_FEED_VALUE_BITS) {
+            let bigger_value_slot = Self::bigger_value_slot(event.data_feed_id);
+            state.storage(adapter, bigger_value_slot)?;
+            updates.push(StateUpdate::slot(adapter, bigger_value_slot, event.value));
+        }
+
+        Some(updates)
+    }
+
+    fn state_updates_for_answer(
+        adapter: Address,
+        data_feed_id: B256,
+        value: U256,
+        updated_at: u64,
+        state: &dyn StateView,
+    ) -> Option<Vec<StateUpdate>> {
+        let event = RedstoneValueUpdate {
+            adapter,
+            data_feed_id,
+            value,
+            updated_at,
+            block_number: None,
+            log_index: None,
+            removed: false,
+        };
+        Self::state_updates_for_value_update(adapter, &event, state)
+    }
+}
+
+/// Storage helpers for RedStone `PriceFeedsAdapter*` push-feed layouts.
+///
+/// These layouts are less common for the current multi-feed deployments but are
+/// still useful for older RedStone adapters and merged price-feed wrappers.
+#[derive(Clone, Debug, Default)]
+pub struct RedstonePriceFeedsStorageAdapter;
+
+impl RedstonePriceFeedsStorageAdapter {
+    /// Return the storage slot for the no-rounds `values[dataFeedId]` mapping.
+    pub fn value_slot(data_feed_id: B256) -> U256 {
+        keyed_slot(
+            data_feed_id,
+            REDSTONE_PRICE_FEEDS_VALUES_MAPPING_STORAGE_LOCATION,
+        )
+    }
+
+    /// Return the storage slot for a with-rounds `values[dataFeedId][roundId]` value.
+    pub fn round_value_slot(data_feed_id: B256, round_id: U256) -> U256 {
+        keyed_slot2(
+            data_feed_id,
+            round_id,
+            REDSTONE_PRICE_FEEDS_VALUES_MAPPING_STORAGE_LOCATION,
+        )
+    }
+
+    /// Return the packed latest-update timestamps slot for no-rounds adapters.
+    pub fn latest_update_timestamps_slot() -> U256 {
+        U256::from_be_slice(
+            REDSTONE_PRICE_FEEDS_LATEST_UPDATE_TIMESTAMPS_STORAGE_LOCATION.as_slice(),
+        )
+    }
+
+    /// Return the slot storing the latest round id for with-rounds adapters.
+    pub fn latest_round_id_slot() -> U256 {
+        U256::from_be_slice(
+            REDSTONE_PRICE_FEEDS_WITH_ROUNDS_LATEST_ROUND_ID_STORAGE_LOCATION.as_slice(),
+        )
+    }
+
+    /// Return the with-rounds timestamp slot for `roundId`.
+    pub fn round_timestamp_slot(round_id: U256) -> U256 {
+        mapping_slot(
+            round_id,
+            U256::from_be_slice(
+                REDSTONE_PRICE_FEEDS_WITH_ROUNDS_ROUND_TIMESTAMPS_MAPPING_STORAGE_LOCATION
+                    .as_slice(),
+            ),
+        )
+    }
+
+    /// Pack no-rounds latest update timestamps.
+    pub fn pack_latest_update_timestamps_from_event(updated_at: u64) -> Option<U256> {
+        let data_timestamp_ms = updated_at.checked_mul(1_000)?;
+        Self::pack_latest_update_timestamps(data_timestamp_ms, updated_at)
+    }
+
+    /// Pack no-rounds latest update timestamps with explicit timestamps.
+    pub fn pack_latest_update_timestamps(
+        data_timestamp_ms: u64,
+        block_timestamp: u64,
+    ) -> Option<U256> {
+        if data_timestamp_ms > uint_mask_u64(128) || block_timestamp > uint_mask_u64(128) {
+            return None;
+        }
+
+        Some(
+            (U256::from(data_timestamp_ms) << REDSTONE_PRICE_FEEDS_BLOCK_TIMESTAMP_OFFSET_BITS)
+                | U256::from(block_timestamp),
+        )
+    }
+
+    fn state_updates_for_value_update(
+        adapter: Address,
+        event: &RedstoneValueUpdate,
+        state: &dyn StateView,
+    ) -> Option<Vec<StateUpdate>> {
+        let value_slot = Self::value_slot(event.data_feed_id);
+        let timestamp_slot = Self::latest_update_timestamps_slot();
+        state.storage(adapter, value_slot)?;
+        state.storage(adapter, timestamp_slot)?;
+        let timestamps = Self::pack_latest_update_timestamps_from_event(event.updated_at)?;
+
+        Some(vec![
+            StateUpdate::slot(adapter, value_slot, event.value),
+            StateUpdate::slot(adapter, timestamp_slot, timestamps),
+        ])
+    }
+
+    fn state_updates_for_no_rounds_answer(
+        adapter: Address,
+        data_feed_id: B256,
+        value: U256,
+        updated_at: u64,
+        state: &dyn StateView,
+    ) -> Option<Vec<StateUpdate>> {
+        let event = RedstoneValueUpdate {
+            adapter,
+            data_feed_id,
+            value,
+            updated_at,
+            block_number: None,
+            log_index: None,
+            removed: false,
+        };
+        Self::state_updates_for_value_update(adapter, &event, state)
+    }
+
+    fn state_updates_for_round_answer(
+        adapter: Address,
+        data_feed_id: B256,
+        round_id: U256,
+        value: U256,
+        updated_at: u64,
+        state: &dyn StateView,
+    ) -> Option<Vec<StateUpdate>> {
+        let value_slot = Self::round_value_slot(data_feed_id, round_id);
+        let round_timestamp_slot = Self::round_timestamp_slot(round_id);
+        let latest_round_id_slot = Self::latest_round_id_slot();
+        state.storage(adapter, value_slot)?;
+        state.storage(adapter, round_timestamp_slot)?;
+        state.storage(adapter, latest_round_id_slot)?;
+
+        Some(vec![
+            StateUpdate::slot(adapter, value_slot, value),
+            StateUpdate::slot(adapter, round_timestamp_slot, U256::from(updated_at)),
+            StateUpdate::slot(adapter, latest_round_id_slot, round_id),
+        ])
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RedstoneValueUpdateKey {
     adapter: Address,
@@ -397,6 +646,7 @@ impl RedstoneReactiveHandler {
         &self,
         ctx: &ReactiveContext,
         log: &alloy_rpc_types_eth::Log,
+        state: &dyn StateView,
     ) -> Result<HandlerOutcome, HandlerError> {
         let event = decode_redstone_value_update(log).map_err(|error| {
             HandlerError::new(format!("decode RedStone ValueUpdate failed: {error}"))
@@ -422,6 +672,7 @@ impl RedstoneReactiveHandler {
             event.log_index,
             event.removed,
             Some(event),
+            state,
         ))
     }
 
@@ -429,6 +680,7 @@ impl RedstoneReactiveHandler {
         &self,
         ctx: &ReactiveContext,
         log: &alloy_rpc_types_eth::Log,
+        state: &dyn StateView,
     ) -> Result<HandlerOutcome, HandlerError> {
         let price_feed = log.address();
         let Some(registrations) = self.registrations_by_answer_updated.get(&price_feed) else {
@@ -450,6 +702,7 @@ impl RedstoneReactiveHandler {
             event.log_index,
             event.removed,
             None,
+            state,
         ))
     }
 
@@ -467,6 +720,7 @@ impl RedstoneReactiveHandler {
         log_index: Option<u64>,
         removed: bool,
         value_update: Option<RedstoneValueUpdate>,
+        state: &dyn StateView,
     ) -> HandlerOutcome {
         let block_number = block_number.or_else(|| ctx.block.as_ref().map(|block| block.number));
         let block_hash = log
@@ -480,9 +734,30 @@ impl RedstoneReactiveHandler {
         };
         let mut effects = Vec::new();
         let mut tags = Vec::new();
+        let direct_updates = if removed {
+            None
+        } else {
+            registrations.first().and_then(|registration| {
+                redstone_state_updates(
+                    registration,
+                    event_source,
+                    raw_answer,
+                    event_round_id,
+                    updated_at,
+                    value_update.as_ref(),
+                    state,
+                )
+            })
+        };
+        let has_direct_updates = direct_updates.is_some();
+        if let Some(updates) = direct_updates {
+            effects.extend(updates.into_iter().map(ReactiveEffect::StateUpdate));
+        }
 
         for registration in registrations {
-            append_redstone_invalidations(&mut effects, registration, event_source);
+            if !has_direct_updates {
+                append_redstone_invalidations(&mut effects, registration, event_source);
+            }
             let hook_tags = redstone_hook_tags(registration, event_source, value_update.as_ref());
             tags.extend(hook_tags.clone());
             effects.push(ReactiveEffect::Hook(HookSignal {
@@ -513,7 +788,11 @@ impl RedstoneReactiveHandler {
 
         HandlerOutcome {
             effects,
-            quality: StateEffectQuality::RequiresRepair,
+            quality: if has_direct_updates {
+                StateEffectQuality::ExactFromInput
+            } else {
+                StateEffectQuality::RequiresRepair
+            },
             tags,
         }
     }
@@ -532,7 +811,7 @@ impl ReactiveHandler<Ethereum> for RedstoneReactiveHandler {
         &self,
         ctx: &ReactiveContext,
         input: &ReactiveInput<Ethereum>,
-        _state: &dyn StateView,
+        state: &dyn StateView,
     ) -> Result<HandlerOutcome, HandlerError> {
         let ReactiveInput::Log(log) = input else {
             return Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect));
@@ -542,8 +821,8 @@ impl ReactiveHandler<Ethereum> for RedstoneReactiveHandler {
         }
 
         match log.topics().first().copied() {
-            Some(REDSTONE_VALUE_UPDATE_TOPIC) => self.handle_value_update(ctx, log),
-            Some(ANSWER_UPDATED_TOPIC) => self.handle_answer_updated(ctx, log),
+            Some(REDSTONE_VALUE_UPDATE_TOPIC) => self.handle_value_update(ctx, log, state),
+            Some(ANSWER_UPDATED_TOPIC) => self.handle_answer_updated(ctx, log, state),
             _ => Ok(HandlerOutcome::empty(StateEffectQuality::NoStateEffect)),
         }
     }
@@ -597,6 +876,149 @@ fn redstone_hook_tags(
 fn redstone_value_to_i256(value: U256) -> Result<I256, HandlerError> {
     I256::try_from(value)
         .map_err(|_| HandlerError::new(format!("RedStone value {value} does not fit int256")))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn redstone_state_updates(
+    registration: &FeedRegistration,
+    event_source: Address,
+    raw_answer: I256,
+    event_round_id: U256,
+    updated_at: u64,
+    value_update: Option<&RedstoneValueUpdate>,
+    state: &dyn StateView,
+) -> Option<Vec<StateUpdate>> {
+    match value_update {
+        Some(event) => redstone_state_updates_for_value_update(registration, event, state),
+        None => redstone_state_updates_for_answer_updated(
+            registration,
+            event_source,
+            raw_answer,
+            event_round_id,
+            updated_at,
+            state,
+        ),
+    }
+}
+
+fn redstone_state_updates_for_value_update(
+    registration: &FeedRegistration,
+    event: &RedstoneValueUpdate,
+    state: &dyn StateView,
+) -> Option<Vec<StateUpdate>> {
+    let FeedSource::RedstonePush {
+        adapter,
+        data_feed_id,
+        ..
+    } = registration.source
+    else {
+        return None;
+    };
+    if event.adapter != adapter || event.data_feed_id != data_feed_id {
+        return None;
+    }
+
+    RedstoneMultiFeedStorageAdapter::state_updates_for_value_update(adapter, event, state).or_else(
+        || RedstonePriceFeedsStorageAdapter::state_updates_for_value_update(adapter, event, state),
+    )
+}
+
+fn redstone_state_updates_for_answer_updated(
+    registration: &FeedRegistration,
+    event_source: Address,
+    raw_answer: I256,
+    event_round_id: U256,
+    updated_at: u64,
+    state: &dyn StateView,
+) -> Option<Vec<StateUpdate>> {
+    let FeedSource::RedstonePush {
+        price_feed,
+        adapter,
+        data_feed_id,
+    } = registration.source
+    else {
+        return None;
+    };
+    if event_source != price_feed || adapter != price_feed {
+        return None;
+    }
+    let value = redstone_i256_to_u256(raw_answer)?;
+
+    if event_round_id == U256::from(REDSTONE_NO_ROUNDS_ROUND_ID) {
+        RedstoneMultiFeedStorageAdapter::state_updates_for_answer(
+            adapter,
+            data_feed_id,
+            value,
+            updated_at,
+            state,
+        )
+        .or_else(|| {
+            RedstonePriceFeedsStorageAdapter::state_updates_for_no_rounds_answer(
+                adapter,
+                data_feed_id,
+                value,
+                updated_at,
+                state,
+            )
+        })
+    } else {
+        RedstonePriceFeedsStorageAdapter::state_updates_for_round_answer(
+            adapter,
+            data_feed_id,
+            event_round_id,
+            value,
+            updated_at,
+            state,
+        )
+    }
+}
+
+fn redstone_i256_to_u256(value: I256) -> Option<U256> {
+    let raw = value.into_raw();
+    if raw >> 255 == U256::ZERO {
+        Some(raw)
+    } else {
+        None
+    }
+}
+
+fn keyed_slot(key: B256, base_slot: B256) -> U256 {
+    let mut preimage = [0_u8; 64];
+    preimage[..32].copy_from_slice(key.as_slice());
+    preimage[32..].copy_from_slice(base_slot.as_slice());
+    U256::from_be_slice(keccak256(preimage).as_slice())
+}
+
+fn keyed_slot2(key0: B256, key1: U256, base_slot: B256) -> U256 {
+    let mut preimage = [0_u8; 96];
+    preimage[..32].copy_from_slice(key0.as_slice());
+    preimage[32..64].copy_from_slice(&key1.to_be_bytes::<32>());
+    preimage[64..].copy_from_slice(base_slot.as_slice());
+    U256::from_be_slice(keccak256(preimage).as_slice())
+}
+
+fn mapping_slot(key: U256, base_slot: U256) -> U256 {
+    let mut preimage = [0_u8; 64];
+    preimage[..32].copy_from_slice(&key.to_be_bytes::<32>());
+    preimage[32..].copy_from_slice(&base_slot.to_be_bytes::<32>());
+    U256::from_be_slice(keccak256(preimage).as_slice())
+}
+
+fn uint_mask(bits: usize) -> U256 {
+    debug_assert!(bits <= 256);
+    match bits {
+        0 => U256::ZERO,
+        256 => U256::MAX,
+        bits => (U256::from(1_u8) << bits) - U256::from(1_u8),
+    }
+}
+
+fn uint_mask_u64(bits: usize) -> u64 {
+    if bits >= 64 {
+        u64::MAX
+    } else {
+        (1_u64 << bits) - 1
+    }
 }
 
 fn derive_redstone_feed_id(label: Option<&str>, price_feed: Address) -> FeedId {

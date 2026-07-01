@@ -65,7 +65,10 @@ pub use price::{CheckedPrice, OraclePrice, PricePolicy};
 pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
 pub use reactive::OracleReactiveHandler;
 #[cfg(feature = "redstone")]
-pub use redstone::{RedstoneFeed, RedstoneOracleAdapter, RedstoneReactiveHandler};
+pub use redstone::{
+    RedstoneFeed, RedstoneMultiFeedStorageAdapter, RedstoneOracleAdapter,
+    RedstonePriceFeedsStorageAdapter, RedstoneReactiveHandler,
+};
 pub use registry::{
     AggregatorChange, EulerQuoteLeg, FeedId, FeedRegistration, FeedSource, MorphoChainlinkFeed,
     MorphoChainlinkFeedRole, OracleDependency, OracleRegistry,
