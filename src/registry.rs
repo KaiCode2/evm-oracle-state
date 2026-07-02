@@ -304,6 +304,17 @@ pub enum FeedSource {
         /// Cross-to-quote leg.
         cross_quote: EulerQuoteLeg,
     },
+    /// Pyth EVM price feed keyed by a shared Pyth contract and per-feed price id.
+    Pyth {
+        /// Shared Pyth contract that emits updates and serves reads.
+        pyth: Address,
+        /// Pyth price feed id.
+        price_id: B256,
+        /// Pyth fixed-point exponent.
+        expo: i32,
+        /// Most recent Pyth confidence interval.
+        conf: u64,
+    },
     /// Adapter-owned oracle source.
     Custom(OracleSourceDescriptor),
 }
@@ -436,6 +447,16 @@ impl FeedSource {
         }
     }
 
+    /// Construct a Pyth EVM source.
+    pub fn pyth(pyth: Address, price_id: B256, expo: i32, conf: u64) -> Self {
+        Self::Pyth {
+            pyth,
+            price_id,
+            expo,
+            conf,
+        }
+    }
+
     /// Construct an adapter-owned custom source.
     pub fn custom(descriptor: OracleSourceDescriptor) -> Self {
         Self::Custom(descriptor)
@@ -468,6 +489,7 @@ impl FeedSource {
                 | Self::MorphoChainlinkV2 { .. }
                 | Self::EulerQuote { .. }
                 | Self::EulerCross { .. }
+                | Self::Pyth { .. }
         )
     }
 
@@ -488,6 +510,7 @@ impl FeedSource {
             Self::MorphoChainlinkV2 { source, .. }
             | Self::EulerQuote { source, .. }
             | Self::EulerCross { source, .. } => *source,
+            Self::Pyth { pyth, .. } => *pyth,
             Self::Custom(descriptor) => descriptor.read_proxy,
         }
     }
@@ -514,6 +537,7 @@ impl FeedSource {
                 .into_iter()
                 .chain(cross_quote.event_aggregator())
                 .collect(),
+            Self::Pyth { pyth, .. } => vec![*pyth],
             Self::AaveFixedPrice { .. } => Vec::new(),
             _ => current_aggregator.into_iter().collect(),
         }
@@ -555,6 +579,7 @@ impl FeedSource {
                 | Self::MorphoChainlinkV2 { .. }
                 | Self::EulerQuote { .. }
                 | Self::EulerCross { .. }
+                | Self::Pyth { .. }
         )
     }
 
@@ -645,6 +670,7 @@ impl FeedSource {
                 cross_quote.price_from_event(aggregator, answer),
                 *cross_decimals,
             ),
+            Self::Pyth { .. } => answer,
             Self::Custom(descriptor) => match &descriptor.transform {
                 OracleTransformDescriptor::Identity | OracleTransformDescriptor::Custom { .. } => {
                     answer
@@ -662,9 +688,10 @@ impl FeedSource {
                 asset_to_peg_aggregator,
                 ..
             } => self.normalize_answer_from_event(Some(*asset_to_peg_aggregator), round.answer),
-            Self::MorphoChainlinkV2 { .. } | Self::EulerQuote { .. } | Self::EulerCross { .. } => {
-                round.answer
-            }
+            Self::MorphoChainlinkV2 { .. }
+            | Self::EulerQuote { .. }
+            | Self::EulerCross { .. }
+            | Self::Pyth { .. } => round.answer,
             _ => self.normalize_answer(round.answer),
         };
         round
@@ -719,6 +746,32 @@ impl FeedSource {
                 peg_to_base_answer,
                 peg_to_base_decimals: *peg_to_base_decimals,
                 output_decimals: *output_decimals,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Return Pyth source fields for Pyth-backed registrations.
+    pub fn pyth_source(&self) -> Option<(Address, B256, i32, u64)> {
+        match self {
+            Self::Pyth {
+                pyth,
+                price_id,
+                expo,
+                conf,
+            } => Some((*pyth, *price_id, *expo, *conf)),
+            _ => None,
+        }
+    }
+
+    /// Return this Pyth source with event-updated metadata.
+    pub fn with_pyth_event_metadata(&self, price_id: B256, expo: i32, conf: u64) -> Option<Self> {
+        match self {
+            Self::Pyth { pyth, .. } => Some(Self::Pyth {
+                pyth: *pyth,
+                price_id,
+                expo,
+                conf,
             }),
             _ => None,
         }

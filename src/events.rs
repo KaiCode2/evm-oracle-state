@@ -20,6 +20,11 @@ pub const OCR2_NEW_TRANSMISSION_TOPIC: B256 =
 pub const OCR1_NEW_TRANSMISSION_TOPIC: B256 =
     b256!("f6a97944f31ea060dfde0566e4167c1a1082551e64b60ecb14d599a9d023d451");
 
+/// Pyth `PriceFeedUpdate(bytes32,uint64,int64,uint64)` topic0.
+#[cfg(feature = "pyth")]
+pub const PYTH_PRICE_FEED_UPDATE_TOPIC: B256 =
+    b256!("d06a6b7f4918494b3719217d1802786c1f5112a6c1d88fe2cfec00b4584f6aec");
+
 mod ocr1_abi {
     alloy_sol_types::sol! {
         event NewTransmission(
@@ -137,6 +142,28 @@ pub struct NewRound {
     pub removed: bool,
 }
 
+/// Decoded Pyth `PriceFeedUpdate` event.
+#[cfg(feature = "pyth")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PythPriceFeedUpdate {
+    /// Emitting Pyth contract address.
+    pub pyth: Address,
+    /// Pyth price feed id.
+    pub price_id: B256,
+    /// Pyth publish timestamp.
+    pub publish_time: u64,
+    /// Fixed-point price value.
+    pub price: i64,
+    /// Pyth confidence interval.
+    pub conf: u64,
+    /// Log block number, when present.
+    pub block_number: Option<u64>,
+    /// Log index, when present.
+    pub log_index: Option<u64>,
+    /// Whether the provider marked the log as removed.
+    pub removed: bool,
+}
+
 /// Decode a Chainlink `AnswerUpdated` log.
 pub fn decode_answer_updated(log: &RpcLog) -> Result<AnswerUpdated, ChainlinkEventDecodeError> {
     require_topic(log, ANSWER_UPDATED_TOPIC)?;
@@ -223,6 +250,37 @@ pub fn decode_new_round(log: &RpcLog) -> Result<NewRound, ChainlinkEventDecodeEr
     })
 }
 
+/// Decode a Pyth `PriceFeedUpdate` log.
+#[cfg(feature = "pyth")]
+pub fn decode_pyth_price_feed_update(
+    log: &RpcLog,
+) -> Result<PythPriceFeedUpdate, ChainlinkEventDecodeError> {
+    require_topic(log, PYTH_PRICE_FEED_UPDATE_TOPIC)?;
+    require_topic_count(log, 2)?;
+    let data = log.inner.data.data.as_ref();
+    if data.len() != 96 {
+        return Err(ChainlinkEventDecodeError::WrongDataLength {
+            expected: 96,
+            actual: data.len(),
+        });
+    }
+
+    let publish_time = u256_to_u64(U256::from_be_slice(&data[0..32]), "publish_time")?;
+    let price = int64_word(&data[32..64])?;
+    let conf = u256_to_u64(U256::from_be_slice(&data[64..96]), "conf")?;
+
+    Ok(PythPriceFeedUpdate {
+        pyth: log.address(),
+        price_id: log.topics()[1],
+        publish_time,
+        price,
+        conf,
+        block_number: log.block_number,
+        log_index: log.log_index,
+        removed: log.removed,
+    })
+}
+
 fn require_topic(log: &RpcLog, expected: B256) -> Result<(), ChainlinkEventDecodeError> {
     let actual = log.topics().first().copied();
     if actual == Some(expected) {
@@ -287,6 +345,22 @@ fn u40_from_context(raw_report_context: B256) -> u64 {
     u64::from_be_bytes([
         0, 0, 0, bytes[27], bytes[28], bytes[29], bytes[30], bytes[31],
     ])
+}
+
+#[cfg(feature = "pyth")]
+fn int64_word(word: &[u8]) -> Result<i64, ChainlinkEventDecodeError> {
+    debug_assert_eq!(word.len(), 32);
+    let negative = word[24] & 0x80 != 0;
+    let expected_prefix = if negative { 0xff } else { 0x00 };
+    if word[..24].iter().any(|byte| *byte != expected_prefix) {
+        return Err(ChainlinkEventDecodeError::AbiDecode {
+            event: "PriceFeedUpdate",
+            message: "price does not fit int64".to_string(),
+        });
+    }
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&word[24..32]);
+    Ok(i64::from_be_bytes(bytes))
 }
 
 fn u256_to_u64(value: U256, field: &'static str) -> Result<u64, ChainlinkEventDecodeError> {

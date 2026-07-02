@@ -20,6 +20,8 @@ mod morpho;
 mod overlay;
 mod price;
 mod provider;
+#[cfg(feature = "pyth")]
+mod pyth;
 mod reactive;
 mod registry;
 mod runtime;
@@ -49,6 +51,10 @@ pub use events::{
     OCR2_NEW_TRANSMISSION_TOPIC, Ocr1NewTransmission, Ocr2NewTransmission, decode_answer_updated,
     decode_new_round, decode_ocr1_new_transmission, decode_ocr2_new_transmission,
 };
+#[cfg(feature = "pyth")]
+pub use events::{
+    PYTH_PRICE_FEED_UPDATE_TOPIC, PythPriceFeedUpdate, decode_pyth_price_feed_update,
+};
 pub use feed::{Feed, FeedAccess, FeedBuilder, FeedBuilderState, FeedReady};
 pub use layout::{
     AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence,
@@ -59,6 +65,8 @@ pub use morpho::{MorphoBlueMarket, MorphoBlueOracleAdapter, MorphoMarketParams};
 pub use overlay::OracleReadOverlay;
 pub use price::{CheckedPrice, OraclePrice, PricePolicy};
 pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
+#[cfg(feature = "pyth")]
+pub use pyth::{PythFeed, PythOracleAdapter, PythReactiveHandler};
 pub use reactive::OracleReactiveHandler;
 pub use registry::{
     AggregatorChange, EulerQuoteLeg, FeedId, FeedRegistration, FeedSource, MorphoChainlinkFeed,

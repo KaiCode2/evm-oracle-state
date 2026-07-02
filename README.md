@@ -1,7 +1,9 @@
 # evm-oracle-state
 
-`evm-oracle-state` tracks Chainlink-compatible, single-value oracle feeds
-through their stable proxy addresses. It is a domain crate layered over
+`evm-oracle-state` tracks single-value EVM oracle feeds through stable typed
+registrations. Chainlink-compatible feeds are tracked through proxy addresses;
+adapter-owned sources such as Pyth can use synthetic per-feed state keys while
+storing their real on-chain source metadata. It is a domain crate layered over
 `evm-fork-cache`: `evm-fork-cache` owns generic cache invalidation, reactive
 batching, and reorg reporting, while this crate owns oracle-specific metadata,
 event decoding, snapshots, staleness policy, reconciliation, and feed lookup.
@@ -63,6 +65,12 @@ aggregator changes, and post-reorg safety still use
   and one-level `CrossAdapter` sources composed from those legs. Chainlink
   dependency events recompute the user-facing quote immediately, and
   `OracleReadOverlay` can serve `getQuote(...)` / `getQuotes(...)`.
+- With the `pyth` feature, use `PythOracleAdapter` and `PythFeed` to register
+  Pyth EVM price ids under a shared Pyth contract. `PriceFeedUpdate` events
+  emit standard `OraclePriceUpdate` hooks immediately, update typed state by
+  `(pyth contract, price id)`, and `OracleReadOverlay` can serve
+  `getPriceUnsafe(bytes32)` / `getPriceNoOlderThan(bytes32,uint256)` from
+  typed state.
 - Queue event-specific, block-identified proxy reconciliation requests after
   committed price updates.
 - Serve simulation-facing `latestRoundData()`, `decimals()`, `description()`,
@@ -94,17 +102,18 @@ features currently add focused surfaces:
 - `aave`: enables `AaveV3OracleAdapter` and `AaveAsset` discovery helpers.
 - `morpho`: enables Morpho Blue oracle discovery helpers.
 - `euler`: enables Euler quote-oracle discovery helpers.
+- `pyth`: enables Pyth EVM price-id discovery, event routing, and overlay reads.
 - `live-tests`: enables websocket dependencies used by RPC-gated live tests.
 
 ## Event to Simulation Flow
 
 ```text
-AnswerUpdated, OCR1 NewTransmission, or OCR2 NewTransmission log
-  -> OracleReactiveHandler decodes the event
+AnswerUpdated, OCR1/OCR2 NewTransmission, or Pyth PriceFeedUpdate log
+  -> adapter reactive handler decodes the event
   -> OraclePriceUpdate hook is emitted immediately
   -> OracleTracker stores an EventPending snapshot
   -> OracleReadOverlay serves registered oracle view calls from typed state
-  -> OracleReconciler reads the proxy latestRoundData()
+  -> OracleReconciler reads the proxy latestRoundData(), when source supports Chainlink reconciliation
   -> snapshot becomes Confirmed, Corrected, Stale, or Invalid
 ```
 
@@ -114,6 +123,8 @@ The cache policy is intentionally conservative:
 - Simulation reads can use the typed overlay immediately.
 - Raw EVM storage is purged/refetched unless a detected layout adapter supports
   the feed.
+- Pyth events currently use typed state plus conservative Pyth-contract storage
+  invalidation; no generic Pyth storage writes are attempted.
 
 ## Dependency-Aware Reactive Routing
 
@@ -314,6 +325,28 @@ let mut oracle = OracleRuntime::cache_builder()
     .await?;
 ```
 
+With `--features pyth`, Pyth price ids can be registered against one shared Pyth
+contract. Each feed gets its own synthetic state key, so multiple price ids on
+the same Pyth contract do not collide in the tracker:
+
+```rust
+use evm_oracle_state::{PythFeed, PythOracleAdapter, OracleRuntime};
+
+let mut oracle = OracleRuntime::cache_builder()
+    .install_adapter(
+        PythOracleAdapter::new().feed(
+            PythFeed::new(pyth_contract, eth_usd_price_id)
+                .id("pyth-eth-usd")
+                .label("Pyth ETH/USD")
+                .base("ETH")
+                .quote("USD")
+                .max_age_secs(300),
+        ),
+    )
+    .build(&mut cache)
+    .await?;
+```
+
 ## Oracle Adapter Plugins
 
 Oracle families that are not plain Chainlink proxies can plug into the same
@@ -407,6 +440,9 @@ built-in Chainlink-compatible handler.
   limitation.
 - Direct storage writes are limited to detected OCR1/OCR2 layouts; unsupported
   or unknown layouts fall back to purge/refetch.
+- Pyth support does not write Pyth contract storage. It decodes
+  `PriceFeedUpdate`, updates typed snapshots, serves Pyth read overlay calls,
+  and invalidates the Pyth contract as a conservative fallback.
 - No in-cache generic call interceptor in the current `evm-fork-cache` surface;
   use `OracleReadOverlay` as the simulation read adapter.
 - No trading, liquidation, or transaction submission behavior.
@@ -424,6 +460,7 @@ to run in CI or during PR review.
 ```sh
 cargo run --example local_oracle_lifecycle
 cargo run --example chainlink_storage_sync_demo
+cargo run --features pyth --example pyth_push_demo
 ```
 
 `local_oracle_lifecycle` is the compile-checked quickstart. It walks through the

@@ -1,6 +1,6 @@
 use alloy_network::{Ethereum, Network};
 use alloy_primitives::{Address, B256, I256, U256};
-use evm_fork_cache::reactive::{ReactiveBatchReport, ReactiveReport};
+use evm_fork_cache::reactive::{ReactiveBatchReport, ReactiveReport, ReportTag};
 
 use crate::{
     AggregatorChange, AggregatorLayoutEvidence, ChainlinkFeedProvider, FeedId, FeedRegistration,
@@ -389,7 +389,7 @@ impl OracleTracker {
                 match signal.kind.as_ref() {
                     kind if kind == OracleSignalKind::PriceUpdate.as_str() => {
                         if let Some(update) = payload.downcast_ref::<OraclePriceUpdate>() {
-                            self.apply_price_update(update.clone())?;
+                            self.apply_price_update_with_tags(update.clone(), &signal.labels)?;
                         }
                     }
                     kind if kind == ORACLE_LEGACY_ANSWER_UPDATED_KIND
@@ -559,10 +559,22 @@ impl OracleTracker {
         Ok(())
     }
 
-    fn apply_price_update(&mut self, update: OraclePriceUpdate) -> Result<(), OracleError> {
-        let Some(registration) = self.registry.registrations_map().get(&update.id).cloned() else {
+    fn apply_price_update_with_tags(
+        &mut self,
+        update: OraclePriceUpdate,
+        labels: &[ReportTag],
+    ) -> Result<(), OracleError> {
+        let Some(mut registration) = self.registry.registrations_map().get(&update.id).cloned()
+        else {
             return Ok(());
         };
+
+        if let Some(new_source) = pyth_source_from_event_tags(&registration.source, labels) {
+            if let Some(stored) = self.registry.registrations_map_mut().get_mut(&update.id) {
+                stored.source = new_source.clone();
+            }
+            registration.source = new_source;
+        }
 
         if !registration
             .source
@@ -1069,6 +1081,37 @@ fn proxy_round_matches_event(proxy_round: &RoundData, event_round: &RoundData) -
     proxy_round.round_id == event_round.round_id
         && proxy_round.answer == event_round.answer
         && proxy_round.updated_at == event_round.updated_at
+}
+
+fn pyth_source_from_event_tags(source: &FeedSource, labels: &[ReportTag]) -> Option<FeedSource> {
+    let (_pyth, price_id, current_expo, current_conf) = source.pyth_source()?;
+    let mut expo = current_expo;
+    let mut conf = current_conf;
+    let mut saw_pyth_label = false;
+
+    for label in labels {
+        match label.key.as_str() {
+            "pyth_expo" => {
+                if let Ok(value) = label.value.parse::<i32>() {
+                    expo = value;
+                    saw_pyth_label = true;
+                }
+            }
+            "pyth_conf" => {
+                if let Ok(value) = label.value.parse::<u64>() {
+                    conf = value;
+                    saw_pyth_label = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    saw_pyth_label.then(|| {
+        source
+            .with_pyth_event_metadata(price_id, expo, conf)
+            .expect("pyth_source returned Some for Pyth source")
+    })
 }
 
 #[allow(dead_code)]

@@ -23,6 +23,7 @@ default = []
 aave = []
 morpho = []
 euler = []
+pyth = []
 live-tests = ["alloy-provider/ws"]
 
 [dependencies]

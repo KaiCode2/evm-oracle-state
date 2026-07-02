@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, Bytes, I256, U256, Uint};
+use alloy_primitives::{Address, B256, Bytes, I256, U256, Uint};
 use alloy_sol_types::{SolCall, sol};
 
 use crate::{
@@ -28,11 +28,24 @@ sol! {
         function getQuote(uint256 inAmount, address base, address quote) external view returns (uint256 outAmount);
         function getQuotes(uint256 inAmount, address base, address quote) external view returns (uint256 bidOutAmount, uint256 askOutAmount);
     }
+
+    struct PythPrice {
+        int64 price;
+        uint64 conf;
+        int32 expo;
+        uint256 publishTime;
+    }
+
+    interface PythInterface {
+        function getPriceUnsafe(bytes32 id) external view returns (PythPrice memory price);
+        function getPriceNoOlderThan(bytes32 id, uint256 age) external view returns (PythPrice memory price);
+    }
 }
 
 use AggregatorV3Interface::{decimalsCall, descriptionCall, latestRoundDataCall, versionCall};
 use EulerPriceOracleInterface::{getQuoteCall, getQuotesCall, getQuotesReturn};
 use MorphoOracleInterface::priceCall;
+use PythInterface::{getPriceNoOlderThanCall, getPriceUnsafeCall};
 
 /// Simulation-facing ABI call overlay backed by typed oracle state.
 pub struct OracleReadOverlay<'a> {
@@ -47,6 +60,10 @@ impl<'a> OracleReadOverlay<'a> {
 
     /// Try to serve a Chainlink proxy view call from typed oracle state.
     pub fn try_call(&self, target: Address, calldata: &[u8]) -> Result<Option<Bytes>, OracleError> {
+        if let Some(bytes) = self.try_pyth_call(target, calldata)? {
+            return Ok(Some(bytes));
+        }
+
         let Some(snapshot) = self.tracker.latest(target) else {
             return Ok(None);
         };
@@ -109,6 +126,72 @@ impl<'a> OracleReadOverlay<'a> {
 
         Ok(None)
     }
+
+    fn try_pyth_call(
+        &self,
+        target: Address,
+        calldata: &[u8],
+    ) -> Result<Option<Bytes>, OracleError> {
+        if calldata.len() < 4 {
+            return Ok(None);
+        }
+
+        let price_id = if calldata[..4] == getPriceUnsafeCall::SELECTOR {
+            getPriceUnsafeCall::abi_decode(calldata)
+                .map_err(|error| {
+                    OracleError::Provider(format!("decode Pyth getPriceUnsafe failed: {error}"))
+                })?
+                .id
+        } else if calldata[..4] == getPriceNoOlderThanCall::SELECTOR {
+            getPriceNoOlderThanCall::abi_decode(calldata)
+                .map_err(|error| {
+                    OracleError::Provider(format!(
+                        "decode Pyth getPriceNoOlderThan failed: {error}"
+                    ))
+                })?
+                .id
+        } else {
+            return Ok(None);
+        };
+
+        let Some((snapshot, expo, conf)) = self.pyth_registration_for_call(target, price_id) else {
+            return Ok(None);
+        };
+        if !is_actionable(snapshot) {
+            return Ok(None);
+        }
+
+        let price = pyth_abi_price(snapshot.round.answer, expo)?;
+        let publish_time = U256::from(snapshot.round.updated_at);
+        let pyth_price = PythPrice {
+            price,
+            conf,
+            expo,
+            publishTime: publish_time,
+        };
+
+        let bytes = if calldata[..4] == getPriceUnsafeCall::SELECTOR {
+            getPriceUnsafeCall::abi_encode_returns(&pyth_price)
+        } else {
+            getPriceNoOlderThanCall::abi_encode_returns(&pyth_price)
+        };
+        Ok(Some(Bytes::from(bytes)))
+    }
+
+    fn pyth_registration_for_call(
+        &self,
+        target: Address,
+        price_id: B256,
+    ) -> Option<(&OracleSnapshot, i32, u64)> {
+        self.tracker.registrations().find_map(|registration| {
+            let (pyth, registered_price_id, expo, conf) = registration.source.pyth_source()?;
+            if pyth != target || registered_price_id != price_id {
+                return None;
+            }
+            let snapshot = self.tracker.latest(registration.proxy)?;
+            Some((snapshot, expo, conf))
+        })
+    }
 }
 
 fn supports_chainlink_overlay(source: &FeedSource) -> bool {
@@ -117,6 +200,7 @@ fn supports_chainlink_overlay(source: &FeedSource) -> bool {
         FeedSource::MorphoChainlinkV2 { .. }
             | FeedSource::EulerQuote { .. }
             | FeedSource::EulerCross { .. }
+            | FeedSource::Pyth { .. }
     )
 }
 
@@ -235,6 +319,27 @@ fn u256_to_uint80(value: U256, field: &'static str) -> Result<Uint<80, 2>, Oracl
 fn i256_to_u256(value: I256, field: &'static str) -> Result<U256, OracleError> {
     U256::try_from(value)
         .map_err(|_| OracleError::Provider(format!("{field} is negative or too large")))
+}
+
+fn i256_to_i64(value: I256, field: &'static str) -> Result<i64, OracleError> {
+    i128::try_from(value)
+        .ok()
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| OracleError::Provider(format!("{field} does not fit int64")))
+}
+
+fn pyth_abi_price(raw_answer: I256, expo: i32) -> Result<i64, OracleError> {
+    let price = if expo > 0 {
+        let scale = I256::unchecked_from(10_i8)
+            .checked_pow(U256::from(expo as u32))
+            .ok_or_else(|| OracleError::Provider(format!("Pyth expo {expo} scale overflowed")))?;
+        raw_answer
+            .checked_div(scale)
+            .ok_or_else(|| OracleError::Provider("Pyth price unscale failed".to_string()))?
+    } else {
+        raw_answer
+    };
+    i256_to_i64(price, "Pyth price")
 }
 
 fn decimal_scale_u256(decimals: u8) -> U256 {
