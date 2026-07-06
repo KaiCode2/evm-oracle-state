@@ -31,6 +31,12 @@ impl std::fmt::Display for OracleAdapterId {
     }
 }
 
+impl AsRef<str> for OracleAdapterId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// Open transform descriptor for non-Chainlink-native source adapters.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

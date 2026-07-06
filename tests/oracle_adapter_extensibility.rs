@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 use alloy_network::Ethereum;
 use alloy_primitives::{Address, B256, Bytes, I256, Log as PrimitiveLog, U256};
@@ -10,17 +10,19 @@ use evm_fork_cache::{
     StateView,
     cache::EvmCache,
     reactive::{
-        BlockRef, ChainStatus, HandlerError, HandlerId, HandlerOutcome, HookSignal, InputSource,
-        LogInterest, ReactiveEffect, ReactiveHandler, ReactiveInput, ReactiveInputBatch,
-        ReactiveInputRecord, ReactiveInterest, ReportTag, RouteKeySpec, StateEffectQuality,
+        BlockRef, ChainStatus, EventSubscriber, HandlerError, HandlerId, HandlerOutcome,
+        HookSignal, InputSource, InterestOwnerSubscriber, LogInterest, ReactiveConfig,
+        ReactiveEffect, ReactiveEngine, ReactiveHandler, ReactiveInput, ReactiveInputBatch,
+        ReactiveInputRecord, ReactiveInterest, ReactiveRuntime, ReportTag, RouteKeySpec,
+        StateEffectQuality, SubscriberBackfill, SubscriberError, SubscriberNextBatch,
     },
 };
 use evm_oracle_state::{
     AdapterFuture, Feed, FeedId, FeedMetadata, FeedRegistration, FeedSource,
     ORACLE_SIGNAL_NAMESPACE, OracleAdapterFeedSkip, OracleAdapterId, OracleAdapterPlugin,
     OracleAdapterSkipReason, OracleDiscoveredFeed, OracleDiscoveryContext, OracleDiscoveryReport,
-    OraclePriceUpdate, OracleRuntime, OracleSignalKind, OracleSnapshotStatus,
-    OracleSourceDescriptor, OracleStorageSync, OracleTransformDescriptor, RoundData,
+    OraclePriceUpdate, OracleRegistry, OracleRuntime, OracleSignalKind, OracleSnapshotStatus,
+    OracleSourceDescriptor, OracleStorageSync, OracleTracker, OracleTransformDescriptor, RoundData,
     StalenessPolicy,
 };
 
@@ -29,6 +31,7 @@ const CUSTOM_TOPIC: B256 = B256::with_last_byte(0x91);
 #[derive(Clone, Debug)]
 struct CustomOracleAdapter {
     id: OracleAdapterId,
+    feed_id: FeedId,
     proxy: Address,
     event_source: Address,
     initial_answer: I256,
@@ -38,6 +41,7 @@ impl CustomOracleAdapter {
     fn new(proxy: Address, event_source: Address, initial_answer: I256) -> Self {
         Self {
             id: OracleAdapterId::new("test.custom-oracle"),
+            feed_id: FeedId::new("custom-usd"),
             proxy,
             event_source,
             initial_answer,
@@ -55,7 +59,7 @@ impl CustomOracleAdapter {
         .transform(OracleTransformDescriptor::Identity);
 
         FeedRegistration {
-            id: FeedId::new("custom-usd"),
+            id: self.feed_id,
             proxy: self.proxy,
             label: Some("Custom/USD".to_string()),
             base: Some("CUSTOM".to_string()),
@@ -67,6 +71,72 @@ impl CustomOracleAdapter {
             source: FeedSource::custom(source),
         }
     }
+}
+
+#[test]
+fn runtime_registers_and_unregisters_seeded_feed() {
+    let proxy = Address::repeat_byte(0x13);
+    let aggregator = Address::repeat_byte(0x23);
+    let mut oracle = OracleRuntime::from_tracker(OracleTracker::new(
+        OracleRegistry::new_at_timestamp(1_700_000_030),
+    ));
+    let registration = FeedRegistration {
+        id: FeedId::new("dynamic-chainlink-usd"),
+        proxy,
+        label: Some("Dynamic/USD".to_string()),
+        base: Some("DYN".to_string()),
+        quote: Some("USD".to_string()),
+        staleness: StalenessPolicy::max_age(3_600),
+        current_aggregator: Some(aggregator),
+        aggregator_layout: None,
+        metadata: metadata(),
+        source: FeedSource::Chainlink,
+    };
+
+    let registered = oracle
+        .register_seeded_feed(
+            registration,
+            round(1, I256::unchecked_from(321_i64), 1_700_000_000),
+        )
+        .expect("seeded feed should register");
+    assert_eq!(
+        registered.registered_feed_ids,
+        vec![FeedId::new("dynamic-chainlink-usd")]
+    );
+    assert!(
+        registered
+            .current_handler_ids
+            .contains(&HandlerId::new("evm-oracle-state.chainlink"))
+    );
+
+    let price = oracle
+        .price("dynamic-chainlink-usd")
+        .expect("dynamic feed should be readable");
+    assert_eq!(price.raw_answer, I256::unchecked_from(321_i64));
+    assert!(
+        oracle
+            .reactive_interests()
+            .iter()
+            .any(|interest| match interest {
+                ReactiveInterest::Logs(interest) => interest.matches(&rpc_log(
+                    aggregator,
+                    vec![evm_oracle_state::ANSWER_UPDATED_TOPIC],
+                    Vec::new(),
+                    101,
+                    0,
+                )),
+                _ => false,
+            })
+    );
+
+    let removed = oracle
+        .unregister_feed_by_proxy(proxy)
+        .expect("seeded feed should unregister by proxy");
+    assert_eq!(
+        removed.removed_feed_ids,
+        vec![FeedId::new("dynamic-chainlink-usd")]
+    );
+    assert!(oracle.price("dynamic-chainlink-usd").is_err());
 }
 
 impl OracleAdapterPlugin for CustomOracleAdapter {
@@ -269,6 +339,205 @@ async fn external_adapter_discovers_feed_and_installs_custom_reactive_handler() 
 }
 
 #[tokio::test]
+async fn runtime_installs_and_uninstalls_handlers_with_engine_owner_lifecycle() {
+    let proxy = Address::repeat_byte(0x12);
+    let event_source = Address::repeat_byte(0x22);
+    let adapter = CustomOracleAdapter::new(proxy, event_source, I256::unchecked_from(123_i64));
+    let mut cache = setup_cache().await;
+    let runtime = OracleRuntime::cache_builder()
+        .install_adapter(adapter)
+        .now_timestamp(1_700_000_030)
+        .build(&mut cache)
+        .await
+        .expect("external adapter should build runtime");
+    let mut engine = ReactiveEngine::new(
+        ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default()),
+        RecordingSubscriber::default(),
+    );
+
+    let installed = runtime
+        .install_handlers_live_only(&mut engine)
+        .expect("oracle handlers should install");
+    assert_eq!(installed.len(), 2);
+    assert!(
+        engine
+            .runtime()
+            .contains_handler(&HandlerId::new("evm-oracle-state.chainlink"))
+    );
+    assert!(
+        engine
+            .runtime()
+            .contains_handler(&HandlerId::new("test.custom-oracle"))
+    );
+    assert!(
+        engine
+            .subscriber()
+            .owner_interests(&HandlerId::new("test.custom-oracle"))
+            .is_some()
+    );
+
+    let removed = runtime.uninstall_handlers(&mut engine);
+    assert_eq!(removed.removed_handler_ids.len(), 2);
+    assert!(
+        !engine
+            .runtime()
+            .contains_handler(&HandlerId::new("test.custom-oracle"))
+    );
+    assert!(
+        engine
+            .subscriber()
+            .owner_interests(&HandlerId::new("test.custom-oracle"))
+            .is_none()
+    );
+
+    let backfill = SubscriberBackfill::range(90, 100);
+    runtime
+        .install_handlers_with_backfill(&mut engine, backfill)
+        .expect("oracle handlers should install with explicit backfill");
+    assert_eq!(
+        engine
+            .subscriber()
+            .backfills
+            .get(&HandlerId::new("test.custom-oracle")),
+        Some(&backfill)
+    );
+}
+
+#[tokio::test]
+async fn runtime_registers_adapter_on_demand_and_refreshes_live_engine() {
+    let proxy = Address::repeat_byte(0x14);
+    let event_source = Address::repeat_byte(0x24);
+    let adapter = CustomOracleAdapter::new(proxy, event_source, I256::unchecked_from(100_i64));
+    let mut cache = setup_cache().await;
+    let mut oracle = OracleRuntime::cache_builder()
+        .now_timestamp(1_700_000_030)
+        .build(&mut cache)
+        .await
+        .expect("empty cache-native runtime should build");
+    let mut engine = ReactiveEngine::new(
+        ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default()),
+        RecordingSubscriber::default(),
+    );
+
+    let mut installed = oracle
+        .install_handlers_live_only(&mut engine)
+        .expect("empty runtime should install built-in handler");
+    assert_eq!(installed.len(), 1);
+    assert!(
+        !engine
+            .runtime()
+            .contains_handler(&HandlerId::new("test.custom-oracle"))
+    );
+
+    let mutation = oracle
+        .register_adapter(adapter, &mut cache)
+        .await
+        .expect("adapter should register dynamically");
+    assert_eq!(
+        mutation.registered_feed_ids,
+        vec![FeedId::new("custom-usd")]
+    );
+    assert!(
+        mutation
+            .current_handler_ids
+            .contains(&HandlerId::new("test.custom-oracle"))
+    );
+
+    let refreshed = oracle
+        .refresh_handlers_live_only(&mut engine, &mut installed)
+        .expect("refresh should replace installed handlers");
+    assert_eq!(
+        refreshed.previous_handler_ids,
+        vec![HandlerId::new("evm-oracle-state.chainlink")]
+    );
+    assert_eq!(installed.len(), 2);
+    assert!(
+        engine
+            .runtime()
+            .contains_handler(&HandlerId::new("test.custom-oracle"))
+    );
+    assert!(
+        engine
+            .subscriber()
+            .owner_interests(&HandlerId::new("test.custom-oracle"))
+            .is_some()
+    );
+
+    let report = engine
+        .ingest_batch(
+            &mut cache,
+            batch(
+                ReactiveInput::Log(rpc_log(
+                    event_source,
+                    vec![CUSTOM_TOPIC],
+                    U256::from(456_u64).to_be_bytes::<32>().to_vec(),
+                    105,
+                    7,
+                )),
+                context(105, 7),
+            ),
+        )
+        .expect("dynamically registered adapter should receive events");
+    let events = oracle
+        .apply_batch_report(&report)
+        .expect("dynamic adapter hook should update state");
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        oracle
+            .price("custom-usd")
+            .expect("dynamic price")
+            .raw_answer,
+        I256::unchecked_from(456_i64)
+    );
+
+    let removed = oracle
+        .unregister_feed_by_id(FeedId::new("custom-usd"))
+        .expect("dynamic adapter feed should unregister");
+    assert_eq!(removed.removed_feed_ids, vec![FeedId::new("custom-usd")]);
+    let refreshed = oracle
+        .refresh_handlers_live_only(&mut engine, &mut installed)
+        .expect("refresh should remove empty adapter handler");
+    assert!(
+        refreshed
+            .removed_handler_ids
+            .contains(&HandlerId::new("test.custom-oracle"))
+    );
+    assert_eq!(installed.len(), 1);
+    assert!(
+        !engine
+            .runtime()
+            .contains_handler(&HandlerId::new("test.custom-oracle"))
+    );
+    assert!(
+        engine
+            .subscriber()
+            .owner_interests(&HandlerId::new("test.custom-oracle"))
+            .is_none()
+    );
+
+    let report = engine
+        .ingest_batch(
+            &mut cache,
+            batch(
+                ReactiveInput::Log(rpc_log(
+                    event_source,
+                    vec![CUSTOM_TOPIC],
+                    U256::from(999_u64).to_be_bytes::<32>().to_vec(),
+                    106,
+                    8,
+                )),
+                context(106, 8),
+            ),
+        )
+        .expect("removed adapter event should not be routed");
+    let events = oracle
+        .apply_batch_report(&report)
+        .expect("removed adapter event should produce no oracle events");
+    assert!(events.is_empty());
+    assert!(oracle.price("custom-usd").is_err());
+}
+
+#[tokio::test]
 async fn external_adapter_event_updates_tracker_state_through_standard_oracle_hook() {
     let proxy = Address::repeat_byte(0x11);
     let event_source = Address::repeat_byte(0x21);
@@ -443,4 +712,61 @@ fn batch(
     context: evm_fork_cache::reactive::ReactiveContext,
 ) -> ReactiveInputBatch<Ethereum> {
     ReactiveInputBatch::new(vec![ReactiveInputRecord::new(input, context)])
+}
+
+#[derive(Default)]
+struct RecordingSubscriber {
+    base_interests: Vec<ReactiveInterest<Ethereum>>,
+    owners: BTreeMap<HandlerId, Vec<ReactiveInterest<Ethereum>>>,
+    backfills: BTreeMap<HandlerId, SubscriberBackfill>,
+}
+
+impl EventSubscriber<Ethereum> for RecordingSubscriber {
+    fn register_interests(
+        &mut self,
+        interests: &[ReactiveInterest<Ethereum>],
+    ) -> Result<(), SubscriberError> {
+        self.base_interests = interests.to_vec();
+        self.owners.clear();
+        self.backfills.clear();
+        Ok(())
+    }
+
+    fn next_batch(&mut self) -> SubscriberNextBatch<'_, Ethereum> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+impl InterestOwnerSubscriber<Ethereum> for RecordingSubscriber {
+    fn add_interest_owner(
+        &mut self,
+        owner: HandlerId,
+        interests: &[ReactiveInterest<Ethereum>],
+    ) -> Result<(), SubscriberError> {
+        self.owners.insert(owner, interests.to_vec());
+        Ok(())
+    }
+
+    fn add_interest_owner_with_backfill(
+        &mut self,
+        owner: HandlerId,
+        interests: &[ReactiveInterest<Ethereum>],
+        backfill: SubscriberBackfill,
+    ) -> Result<(), SubscriberError> {
+        self.backfills.insert(owner.clone(), backfill);
+        self.owners.insert(owner, interests.to_vec());
+        Ok(())
+    }
+
+    fn remove_interest_owner(
+        &mut self,
+        owner: &HandlerId,
+    ) -> Option<Vec<ReactiveInterest<Ethereum>>> {
+        self.backfills.remove(owner);
+        self.owners.remove(owner)
+    }
+
+    fn owner_interests(&self, owner: &HandlerId) -> Option<&[ReactiveInterest<Ethereum>]> {
+        self.owners.get(owner).map(Vec::as_slice)
+    }
 }

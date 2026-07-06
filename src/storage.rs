@@ -98,6 +98,18 @@ pub trait OracleStorageAdapter: Send + Sync {
     /// Stable adapter name for diagnostics.
     fn name(&self) -> &'static str;
 
+    /// Storage slots that should be warmed before live event handling.
+    ///
+    /// Direct storage adapters may need a packed word to be present before they
+    /// can safely emit masked writes. Returning these slots lets callers bulk
+    /// load them once through `evm-fork-cache` before entering the reactive loop.
+    fn warm_slots_for_registration(
+        &self,
+        _registration: &FeedRegistration,
+    ) -> Vec<(Address, U256)> {
+        Vec::new()
+    }
+
     /// Produce direct state updates for a detected oracle layout.
     fn state_updates_for_answer(
         &self,
@@ -233,6 +245,17 @@ impl ChainlinkOcr2StorageAdapter {
 impl OracleStorageAdapter for ChainlinkOcr2StorageAdapter {
     fn name(&self) -> &'static str {
         Self::NAME
+    }
+
+    fn warm_slots_for_registration(&self, registration: &FeedRegistration) -> Vec<(Address, U256)> {
+        let Some(aggregator) = registration.current_aggregator else {
+            return Vec::new();
+        };
+        if registration_supports_ocr2(registration, aggregator) {
+            vec![(aggregator, Self::hot_vars_slot())]
+        } else {
+            Vec::new()
+        }
     }
 
     fn state_updates_for_answer(
@@ -435,6 +458,17 @@ impl OracleStorageAdapter for ChainlinkOcr1StorageAdapter {
         Self::NAME
     }
 
+    fn warm_slots_for_registration(&self, registration: &FeedRegistration) -> Vec<(Address, U256)> {
+        let Some(aggregator) = registration.current_aggregator else {
+            return Vec::new();
+        };
+        if registration_supports_ocr1(registration, aggregator) {
+            vec![(aggregator, Self::hot_vars_slot())]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn state_updates_for_answer(
         &self,
         _registration: &FeedRegistration,
@@ -542,6 +576,24 @@ impl OracleStorageSync {
     /// Return true when no storage adapters are configured.
     pub fn is_empty(&self) -> bool {
         self.adapters.is_empty()
+    }
+
+    /// Return the de-duplicated storage slots needed for direct event writes.
+    pub fn warm_slots_for_registrations<'a>(
+        &self,
+        registrations: impl IntoIterator<Item = &'a FeedRegistration>,
+    ) -> Vec<(Address, U256)> {
+        let mut slots = Vec::new();
+        for registration in registrations {
+            for adapter in &self.adapters {
+                for slot in adapter.warm_slots_for_registration(registration) {
+                    if !slots.contains(&slot) {
+                        slots.push(slot);
+                    }
+                }
+            }
+        }
+        slots
     }
 
     /// Try adapters in order, falling back to purge/refetch if none supports the feed.

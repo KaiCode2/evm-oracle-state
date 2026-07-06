@@ -27,9 +27,9 @@ pyth = []
 live-tests = ["alloy-provider/ws"]
 
 [dependencies]
-# Companion crate, published on crates.io. The live AlloySubscriber and cold-start
-# updates this crate relies on shipped in the public 0.1.0 release.
-evm-fork-cache = "0.1"
+# Companion crate, published on crates.io. The live AlloySubscriber, cold-start
+# updates, and reactive runtime this crate relies on are in the public 0.2.0 release.
+evm-fork-cache = "0.2.0"
 
 alloy-eips = "1.0.38"
 alloy-network = "1.0.38"

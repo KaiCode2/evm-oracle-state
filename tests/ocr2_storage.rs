@@ -271,6 +271,33 @@ fn ocr2_adapter_declines_cold_hot_vars_slot_for_purge_fallback() {
 }
 
 #[test]
+fn ocr2_storage_warmup_declares_and_dedupes_hot_vars_slot() {
+    let aggregator = Address::repeat_byte(0x20);
+    let first = registration_with_source(
+        "eth-usd",
+        Address::repeat_byte(0x10),
+        aggregator,
+        FeedSource::Chainlink,
+        "ETH/USD",
+    );
+    let second = registration_with_source(
+        "weth-usd",
+        Address::repeat_byte(0x11),
+        aggregator,
+        FeedSource::Chainlink,
+        "WETH/USD",
+    );
+
+    let slots =
+        OracleStorageSync::chainlink_defaults().warm_slots_for_registrations([&first, &second]);
+
+    assert_eq!(
+        slots,
+        vec![(aggregator, ChainlinkOcr2StorageAdapter::hot_vars_slot())]
+    );
+}
+
+#[test]
 fn ocr2_handler_subscribes_to_new_transmission_instead_of_answer_updated() {
     let proxy = Address::repeat_byte(0x10);
     let aggregator = Address::repeat_byte(0x20);

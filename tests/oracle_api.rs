@@ -12,10 +12,11 @@ use evm_fork_cache::{
 };
 use evm_oracle_state::{
     ANSWER_UPDATED_TOPIC, ChainlinkFeed, ChainlinkFeedProvider, FeedId, FeedMetadata,
-    FeedRegistration, FeedSource, ORACLE_SIGNAL_NAMESPACE, OracleError, OracleHookEvent,
-    OraclePriceUpdate, OracleReactiveHandler, OracleRuntime, OracleSignal, OracleSignalKind,
-    OracleSnapshotStatus, OracleStorageAdapter, OracleStorageError, OracleStorageSync,
-    OracleTracker, RoundData, StalenessPolicy,
+    FeedRegistration, FeedSource, ORACLE_SIGNAL_NAMESPACE, OracleCodeMismatch,
+    OracleCodeUnverifiable, OracleCodeWarmupPolicy, OracleCodeWarmupReport, OracleError,
+    OracleHookEvent, OraclePriceUpdate, OracleReactiveHandler, OracleRuntime, OracleSignal,
+    OracleSignalKind, OracleSnapshotStatus, OracleStorageAdapter, OracleStorageError,
+    OracleStorageSync, OracleTracker, RoundData, StalenessPolicy,
 };
 
 type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, OracleError>> + Send + 'a>>;
@@ -307,5 +308,51 @@ fn storage_adapter_path_emits_state_updates_without_purge_fallback() {
             .iter()
             .any(|effect| matches!(effect, ReactiveEffect::Invalidate(_))),
         "supported storage adapters should bypass purge fallback"
+    );
+}
+
+#[test]
+fn code_warmup_policy_distinguishes_contradictions_from_unverifiable_claims() {
+    let report = OracleCodeWarmupReport {
+        mismatched: vec![OracleCodeMismatch {
+            address: Address::repeat_byte(0x41),
+            expected: B256::repeat_byte(0x01),
+            actual: B256::repeat_byte(0x02),
+        }],
+        unverifiable: vec![OracleCodeUnverifiable {
+            address: Address::repeat_byte(0x42),
+            reason: "transient provider failure".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    assert!(
+        report
+            .enforce_policy(OracleCodeWarmupPolicy::best_effort())
+            .is_ok(),
+        "best effort should only record failures"
+    );
+    assert!(
+        report
+            .enforce_policy(OracleCodeWarmupPolicy::allow_unverifiable())
+            .is_err(),
+        "allow_unverifiable should still fail on code hash contradictions"
+    );
+
+    let transient_only = OracleCodeWarmupReport {
+        unverifiable: report.unverifiable,
+        ..Default::default()
+    };
+    assert!(
+        transient_only
+            .enforce_policy(OracleCodeWarmupPolicy::allow_unverifiable())
+            .is_ok(),
+        "default policy should allow unsettled verification without contradictions"
+    );
+    assert!(
+        transient_only
+            .enforce_policy(OracleCodeWarmupPolicy::strict())
+            .is_err(),
+        "strict policy should fail on unsettled verification"
     );
 }

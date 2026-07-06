@@ -309,6 +309,35 @@ impl OracleTracker {
         self.registry.registrations()
     }
 
+    /// Insert a pre-discovered feed and seed its latest proxy-read snapshot.
+    pub fn insert_seeded_registration(
+        &mut self,
+        registration: FeedRegistration,
+        round: RoundData,
+    ) -> Result<(), OracleError> {
+        self.registry
+            .insert_seeded_registration(registration, round)
+    }
+
+    /// Remove a feed by id, including its latest snapshot and pending reconciliation.
+    pub fn remove_by_id(&mut self, id: FeedId) -> Option<FeedRegistration> {
+        let registration = self.registry.remove_registration_by_id(id)?;
+        self.clear_pending_for_proxy(registration.proxy);
+        Some(registration)
+    }
+
+    /// Remove a feed by proxy, including its latest snapshot and pending reconciliation.
+    pub fn remove_by_proxy(&mut self, proxy: Address) -> Option<FeedRegistration> {
+        let registration = self.registry.remove_registration_by_proxy(proxy)?;
+        self.clear_pending_for_proxy(registration.proxy);
+        Some(registration)
+    }
+
+    /// Return the timestamp used for snapshot freshness classification.
+    pub fn now_timestamp(&self) -> u64 {
+        self.registry.now_timestamp()
+    }
+
     /// Return the latest snapshot by proxy.
     pub fn latest(&self, proxy: Address) -> Option<&OracleSnapshot> {
         self.registry.latest(proxy)

@@ -209,8 +209,147 @@ The OCR1 adapter targets the common `AccessControlledOffchainAggregator`
 `latestRoundData()` behavior.
 
 Adapters only claim events when registration or reconciliation has detected a
-supported layout and the packed hot-vars slot is already hot in
-`evm-fork-cache`; otherwise the existing purge/refetch fallback remains active.
+supported layout and the packed hot-vars slot is hot in `evm-fork-cache`;
+otherwise the existing purge/refetch fallback remains active. Cache-native
+builds now prewarm those slots by default through `EvmCache::prewarm_slots`, so
+the direct-write path is ready before the reactive loop starts:
+
+```rust
+let report = OracleAdapter::builder()
+    .feed(Feed::proxy(eth_usd_proxy).id("eth-usd"))
+    .build_report(&mut cache)
+    .await?;
+
+let oracle = OracleRuntime::from_tracker(report.tracker);
+let warmup = oracle.prewarm_storage(&mut cache);
+assert_eq!(warmup.failed_slots.len(), 0);
+```
+
+`prewarm_storage` uses `evm-fork-cache`'s installed storage batch fetcher. In
+v0.2.0 that fetcher defaults to bulk `eth_call` storage extraction: target
+contracts are temporarily run with a tiny extractor bytecode that performs raw
+`SLOAD`s for the requested slots, and Multicall3 dispatches many target
+contracts in a small number of calls. This is the fast path for known OCR hot
+slots. The point-read `eth_getStorageAt` strategy is still available through
+`EvmCacheBuilder::storage_fetch_strategy(StorageFetchStrategy::PointRead)` for
+benchmarking or provider fallback.
+
+Adapter-plugin runtimes expose the same work in their build report:
+
+```rust
+let report = OracleRuntime::cache_builder()
+    .install_adapter(my_adapter)
+    .storage_cold_start()
+    .build_report(&mut cache)
+    .await?;
+
+println!(
+    "oracle storage warmup: {}/{} slots",
+    report.storage_warmup.loaded_slots,
+    report.storage_warmup.requested_slots
+);
+```
+
+Call `.disable_storage_warmup()` when a caller intentionally wants lazy
+fallback behavior, or call `oracle.storage_warmup_slots()` to inspect the exact
+declared hot slots. The default mode uses `EvmCache::prewarm_slots`; use
+`.storage_cold_start()` or `oracle.cold_start_storage(&mut cache)` when the
+caller wants v0.2.0 cold-start verification through `EvmCache::run_cold_start`.
+Cold-start mode first verifies declared hot slots, then runs discovery calls
+such as `latestRoundData()` and bulk-verifies any newly discovered slots in a
+second round. Known storage goes through raw SLOAD extraction; dynamic
+metadata/proxy composition that cannot be represented safely as fixed slots
+stays on typed view calls.
+
+Cache-native Chainlink registration prefers direct RPC Multicall3 for proxy
+view reads, then falls back to fork-cache simulation or sequential cache calls
+when direct RPC batching is unavailable:
+
+```rust
+let report = OracleAdapter::builder()
+    .feeds(feeds)
+    .multicall_reads(true) // default
+    .build_report(&mut cache)
+    .await?;
+```
+
+This batches `decimals()`, `description()`, `version()`, `latestRoundData()`,
+and `aggregator()` for each proxy into one direct `eth_call` to Multicall3. It
+then batches aggregator `typeAndVersion()` reads the same way, so layout
+detection does not hydrate each proxy/aggregator through the local fork VM.
+Known hot storage still loads through `EvmCache::prewarm_slots`, which uses
+`evm-fork-cache`'s bulk SLOAD extraction path.
+
+## Oracle Code Warmup
+
+The cache-native runtime can also install oracle-related bytecode before
+discovery. Canonical seeds are verified once against the chain code hash through
+`evm-fork-cache`; explicit etches are available for local simulation code and
+are reported separately:
+
+```rust
+let report = OracleRuntime::cache_builder()
+    .code_seeds(verified_oracle_bytecodes)
+    .code_etch(local_adapter, simulation_runtime_code)
+    .code_warmup_policy(OracleCodeWarmupPolicy::strict())
+    .install_adapter(my_adapter)
+    .build_report(&mut cache)
+    .await?;
+
+assert!(report.code_warmup.mismatched.is_empty());
+assert!(report.code_warmup.install_errors.is_empty());
+```
+
+Use `code_seed`/`code_seeds` for bytecode that must match the pinned chain
+state. Use `code_etch`/`code_etches` only when local divergence is deliberate.
+The default policy fails on install errors, hash mismatches, undeployed
+addresses, and codeless accounts, but allows transient verification
+uncertainty. `OracleCodeWarmupPolicy::strict()` also fails on unverifiable
+claims and verification transport errors, while `best_effort()` records all
+outcomes without failing the build.
+
+## Reactive Lifecycle
+
+The runtime can install its handlers into `evm-fork-cache`'s owner-scoped
+`ReactiveEngine`, then remove them later without disturbing unrelated handlers:
+
+```rust
+let mut installed = oracle.install_handlers_live_only(&mut engine)?;
+assert!(!installed.is_empty());
+
+let removed = oracle.uninstall_installed_handlers(&mut engine, &mut installed);
+assert_eq!(removed.removed_handler_ids.len(), removed.handler_ids.len());
+```
+
+Use `install_handlers(&mut engine)` for continuity-safe registration that
+backfills from the runtime's last canonical block, or
+`install_handlers_with_backfill(&mut engine, SubscriberBackfill::from_block(n))`
+for an explicit historical anchor. This is the preferred v0.2.0 path for
+registering/unregistering oracle tracking at runtime; the older
+`register_subscriber` helper remains a full-replacement bootstrap path.
+
+Oracle registrations can also change after startup. Register already-discovered
+feeds with `register_seeded_feed`, or install another cache-native adapter on an
+existing runtime:
+
+```rust
+let mutation = oracle
+    .register_adapter(PythOracleAdapter::new().feed(btc_usd), &mut cache)
+    .await?;
+assert!(mutation.registered_feed_ids.iter().any(|id| id.as_str() == "btc-usd"));
+
+let refreshed = oracle.refresh_handlers_live_only(&mut engine, &mut installed)?;
+assert_eq!(installed.handler_ids, refreshed.installed_handler_ids);
+
+let removed = oracle.unregister_feed_by_id(FeedId::new("btc-usd"))?;
+assert_eq!(removed.removed_feed_ids.len(), 1);
+oracle.refresh_handlers_live_only(&mut engine, &mut installed)?;
+```
+
+The refresh step is explicit because it is the boundary where the in-memory
+typed registry is projected into a live subscriber. Passing the prior
+`OracleReactiveInstallReport` lets the runtime unsubscribe stale adapter
+handlers even when the current registration set no longer includes them.
 
 ## Ergonomic Runtime
 
@@ -488,6 +627,7 @@ The live examples are network-gated:
 cargo run --example chainlink_live_probe
 ETH_RPC_URL=https://example-rpc.invalid cargo run --example chainlink_live_probe
 ETH_RPC_URL=https://example-rpc.invalid SMOKE_DURATION_SECS=600 cargo run --example chainlink_reactive_smoke
+ETH_RPC_URL=https://example-rpc.invalid cargo run --example oracle_storage_warmup_bench
 ETH_RPC_URL=https://example-http-rpc.invalid ETH_WS_RPC_URL=wss://example-ws-rpc.invalid AAVE_DEMO_DURATION_SECS=600 cargo run --features aave --example aave_v3_health_factor -- 0xcc144c2e9fc40f92257b2cd7cc43e1f82666f09a
 ETH_RPC_URL=https://example-http-rpc.invalid ETH_WS_RPC_URL=wss://example-ws-rpc.invalid MORPHO_MARKET_ID=0x... EULER_ORACLE=0x... EULER_BASE=0x... EULER_QUOTE=0x... cargo run --features morpho,euler --example morpho_euler_reactive_value
 ```

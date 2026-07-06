@@ -657,12 +657,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.102"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
-
-[[package]]
 name = "ark-bls12-381"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1729,9 +1723,9 @@ dependencies = [
 
 [[package]]
 name = "evm-fork-cache"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20d6f91455537448c7b36e1f13980819a511cc41db3e3b12ab1ce3dae7f1e3f0"
+checksum = "78bd6942590fe9538370add7be5661e14428a69544084b5b2b5fd8b0dc7a93c2"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
@@ -1743,7 +1737,6 @@ dependencies = [
  "alloy-rpc-client",
  "alloy-rpc-types-eth",
  "alloy-sol-types",
- "anyhow",
  "bincode",
  "foundry-fork-db",
  "futures",

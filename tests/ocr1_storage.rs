@@ -299,6 +299,24 @@ fn ocr1_adapter_declines_cold_hot_vars_slot_for_purge_fallback() {
 }
 
 #[test]
+fn ocr1_storage_warmup_declares_hot_vars_slot() {
+    let aggregator = Address::repeat_byte(0x20);
+    let registration = registration(
+        Address::repeat_byte(0x10),
+        aggregator,
+        "AccessControlledOffchainAggregator 3.0.0",
+    );
+
+    let slots =
+        OracleStorageSync::chainlink_defaults().warm_slots_for_registrations([&registration]);
+
+    assert_eq!(
+        slots,
+        vec![(aggregator, ChainlinkOcr1StorageAdapter::hot_vars_slot())]
+    );
+}
+
+#[test]
 fn ocr1_handler_subscribes_to_new_transmission_instead_of_answer_updated() {
     let proxy = Address::repeat_byte(0x10);
     let aggregator = Address::repeat_byte(0x20);

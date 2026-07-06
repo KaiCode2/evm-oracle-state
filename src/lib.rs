@@ -8,6 +8,7 @@
 mod aave;
 mod adapter;
 mod cache_reader;
+mod code;
 mod config;
 mod error;
 #[cfg(feature = "euler")]
@@ -42,6 +43,11 @@ pub use cache_reader::{
     EvmCacheChainlinkReader, OracleAdapter, OracleAdapterBuildReport, OracleAdapterBuilder,
     OracleAdapterFeedSkip, OracleAdapterSkipReason,
 };
+pub use code::{
+    OracleCodeInstall, OracleCodeInstallError, OracleCodeInstallMode, OracleCodeMismatch,
+    OracleCodeRegistry, OracleCodeSeed, OracleCodeUnverifiable, OracleCodeWarmupPolicy,
+    OracleCodeWarmupReport,
+};
 pub use config::{FeedConfig, StalenessPolicy};
 pub use error::{ChainlinkEventDecodeError, OracleError, OracleSignalDecodeError};
 #[cfg(feature = "euler")]
@@ -73,8 +79,11 @@ pub use registry::{
     MorphoChainlinkFeedRole, OracleDependency, OracleRegistry,
 };
 pub use runtime::{
-    ChainlinkFeed, OracleCacheRuntimeBuildReport, OracleCacheRuntimeBuilder, OracleRuntime,
-    OracleRuntimeBuilder,
+    ChainlinkFeed, OracleCacheRuntimeBuildReport, OracleCacheRuntimeBuilder,
+    OracleColdStartWarmupReport, OracleReactiveInstallReport, OracleReactiveRefreshReport,
+    OracleReactiveUninstallReport, OracleRuntime, OracleRuntimeBuilder,
+    OracleRuntimeMutationReport, OracleStorageWarmupFailure, OracleStorageWarmupMode,
+    OracleStorageWarmupReport,
 };
 pub use signal::{
     ORACLE_LEGACY_ANSWER_UPDATED_KIND, ORACLE_SIGNAL_NAMESPACE, OracleSignal, OracleSignalKind,

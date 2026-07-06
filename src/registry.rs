@@ -1118,6 +1118,49 @@ impl OracleRegistry {
         self.snapshots_by_proxy.insert(snapshot.proxy, snapshot);
     }
 
+    pub(crate) fn insert_seeded_registration(
+        &mut self,
+        registration: FeedRegistration,
+        round: RoundData,
+    ) -> Result<(), OracleError> {
+        if self.ids_by_proxy.contains_key(&registration.proxy) {
+            return Err(OracleError::DuplicateProxy(registration.proxy));
+        }
+        if self.registrations.contains_key(&registration.id) {
+            return Err(OracleError::DuplicateFeedId(registration.id.to_string()));
+        }
+
+        let snapshot = OracleSnapshot::proxy_read(
+            registration.id,
+            registration.proxy,
+            registration.current_aggregator,
+            registration.metadata.clone(),
+            registration.source.normalize_round(round),
+            self.now_timestamp,
+            &registration.staleness,
+        );
+        self.ids_by_proxy
+            .insert(registration.proxy, registration.id);
+        self.snapshots_by_proxy.insert(registration.proxy, snapshot);
+        self.registrations.insert(registration.id, registration);
+        Ok(())
+    }
+
+    pub(crate) fn remove_registration_by_id(&mut self, id: FeedId) -> Option<FeedRegistration> {
+        let registration = self.registrations.remove(&id)?;
+        self.ids_by_proxy.remove(&registration.proxy);
+        self.snapshots_by_proxy.remove(&registration.proxy);
+        Some(registration)
+    }
+
+    pub(crate) fn remove_registration_by_proxy(
+        &mut self,
+        proxy: Address,
+    ) -> Option<FeedRegistration> {
+        let id = *self.ids_by_proxy.get(&proxy)?;
+        self.remove_registration_by_id(id)
+    }
+
     pub(crate) async fn detect_aggregator_layout<P: ChainlinkFeedProvider>(
         &mut self,
         provider: &P,
@@ -1198,7 +1241,7 @@ pub(crate) fn snapshot_from_proxy_read(
     )
 }
 
-fn derive_feed_id(label: Option<&str>, proxy: Address) -> FeedId {
+pub(crate) fn derive_feed_id(label: Option<&str>, proxy: Address) -> FeedId {
     if let Some(label) = label {
         let slug = label
             .chars()
