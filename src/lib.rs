@@ -25,6 +25,8 @@ mod provider;
 #[cfg(feature = "pyth")]
 mod pyth;
 mod reactive;
+#[cfg(feature = "redstone")]
+mod redstone;
 mod registry;
 mod runtime;
 mod signal;
@@ -62,6 +64,8 @@ pub use events::{
 pub use events::{
     PYTH_PRICE_FEED_UPDATE_TOPIC, PythPriceFeedUpdate, decode_pyth_price_feed_update,
 };
+#[cfg(feature = "redstone")]
+pub use events::{REDSTONE_VALUE_UPDATE_TOPIC, RedstoneValueUpdate, decode_redstone_value_update};
 pub use feed::{Feed, FeedAccess, FeedBuilder, FeedBuilderState, FeedReady};
 pub use layout::{
     AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence,
@@ -76,6 +80,11 @@ pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
 #[cfg(feature = "pyth")]
 pub use pyth::{PythFeed, PythOracleAdapter, PythReactiveHandler};
 pub use reactive::OracleReactiveHandler;
+#[cfg(feature = "redstone")]
+pub use redstone::{
+    RedstoneFeed, RedstoneMultiFeedStorageAdapter, RedstoneOracleAdapter,
+    RedstonePriceFeedsStorageAdapter, RedstoneReactiveHandler,
+};
 pub use registry::{
     AggregatorChange, EulerQuoteLeg, FeedId, FeedRegistration, FeedSource, MorphoChainlinkFeed,
     MorphoChainlinkFeedRole, OracleDependency, OracleRegistry,

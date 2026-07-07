@@ -315,6 +315,16 @@ pub enum FeedSource {
         /// Most recent Pyth confidence interval.
         conf: u64,
     },
+    /// RedStone push price feed backed by an on-chain adapter/event source.
+    #[cfg(feature = "redstone")]
+    RedstonePush {
+        /// User-facing RedStone price feed wrapper.
+        price_feed: Address,
+        /// RedStone adapter or merged price-feed event source.
+        adapter: Address,
+        /// RedStone data feed id.
+        data_feed_id: B256,
+    },
     /// Adapter-owned oracle source.
     Custom(OracleSourceDescriptor),
 }
@@ -457,6 +467,16 @@ impl FeedSource {
         }
     }
 
+    /// Construct a RedStone push source.
+    #[cfg(feature = "redstone")]
+    pub fn redstone_push(price_feed: Address, adapter: Address, data_feed_id: B256) -> Self {
+        Self::RedstonePush {
+            price_feed,
+            adapter,
+            data_feed_id,
+        }
+    }
+
     /// Construct an adapter-owned custom source.
     pub fn custom(descriptor: OracleSourceDescriptor) -> Self {
         Self::Custom(descriptor)
@@ -511,6 +531,8 @@ impl FeedSource {
             | Self::EulerQuote { source, .. }
             | Self::EulerCross { source, .. } => *source,
             Self::Pyth { pyth, .. } => *pyth,
+            #[cfg(feature = "redstone")]
+            Self::RedstonePush { price_feed, .. } => *price_feed,
             Self::Custom(descriptor) => descriptor.read_proxy,
         }
     }
@@ -538,6 +560,18 @@ impl FeedSource {
                 .chain(cross_quote.event_aggregator())
                 .collect(),
             Self::Pyth { pyth, .. } => vec![*pyth],
+            #[cfg(feature = "redstone")]
+            Self::RedstonePush {
+                price_feed,
+                adapter,
+                ..
+            } => {
+                let mut aggregators = vec![*adapter];
+                if price_feed != adapter {
+                    aggregators.push(*price_feed);
+                }
+                aggregators
+            }
             Self::AaveFixedPrice { .. } => Vec::new(),
             _ => current_aggregator.into_iter().collect(),
         }
@@ -572,15 +606,17 @@ impl FeedSource {
 
     /// Return true when Chainlink storage adapters can safely mirror this event.
     pub fn supports_direct_chainlink_storage_effects(&self) -> bool {
-        !matches!(
-            self,
+        match self {
             Self::AaveRatioCap { .. }
-                | Self::AaveSynchronicityPegToBase { .. }
-                | Self::MorphoChainlinkV2 { .. }
-                | Self::EulerQuote { .. }
-                | Self::EulerCross { .. }
-                | Self::Pyth { .. }
-        )
+            | Self::AaveSynchronicityPegToBase { .. }
+            | Self::MorphoChainlinkV2 { .. }
+            | Self::EulerQuote { .. }
+            | Self::EulerCross { .. }
+            | Self::Pyth { .. } => false,
+            #[cfg(feature = "redstone")]
+            Self::RedstonePush { .. } => false,
+            _ => true,
+        }
     }
 
     /// Apply the source transform to an event or read answer.
@@ -671,6 +707,8 @@ impl FeedSource {
                 *cross_decimals,
             ),
             Self::Pyth { .. } => answer,
+            #[cfg(feature = "redstone")]
+            Self::RedstonePush { .. } => answer,
             Self::Custom(descriptor) => match &descriptor.transform {
                 OracleTransformDescriptor::Identity | OracleTransformDescriptor::Custom { .. } => {
                     answer

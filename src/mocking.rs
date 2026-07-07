@@ -12,7 +12,7 @@ use crate::{
 /// A requested oracle price mock.
 ///
 /// The price is expressed in the feed's raw answer units, matching
-/// `latestRoundData().answer`. For an 8-decimal ETH/USD feed, `2_500_00000000`
+/// `latestRoundData().answer`. For an 8-decimal ETH/USD feed, `250_000_000_000`
 /// means `2500.00000000`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OraclePriceMock {

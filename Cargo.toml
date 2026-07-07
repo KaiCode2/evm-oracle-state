@@ -24,6 +24,7 @@ aave = []
 morpho = []
 euler = []
 pyth = []
+redstone = []
 live-tests = ["alloy-provider/ws"]
 
 [dependencies]

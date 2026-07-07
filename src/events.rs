@@ -25,6 +25,11 @@ pub const OCR1_NEW_TRANSMISSION_TOPIC: B256 =
 pub const PYTH_PRICE_FEED_UPDATE_TOPIC: B256 =
     b256!("d06a6b7f4918494b3719217d1802786c1f5112a6c1d88fe2cfec00b4584f6aec");
 
+/// RedStone `ValueUpdate(uint256,bytes32,uint256)` topic0.
+#[cfg(feature = "redstone")]
+pub const REDSTONE_VALUE_UPDATE_TOPIC: B256 =
+    b256!("f36866d965ee70c8632ff558f5cf8d41ee9ca1d0d0bc7700786e57be60747390");
+
 mod ocr1_abi {
     alloy_sol_types::sol! {
         event NewTransmission(
@@ -164,6 +169,26 @@ pub struct PythPriceFeedUpdate {
     pub removed: bool,
 }
 
+/// Decoded RedStone `ValueUpdate` event.
+#[cfg(feature = "redstone")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RedstoneValueUpdate {
+    /// Emitting RedStone adapter address.
+    pub adapter: Address,
+    /// RedStone data feed id.
+    pub data_feed_id: B256,
+    /// Unsigned RedStone value.
+    pub value: U256,
+    /// Event `updatedAt` timestamp.
+    pub updated_at: u64,
+    /// Log block number, when present.
+    pub block_number: Option<u64>,
+    /// Log index, when present.
+    pub log_index: Option<u64>,
+    /// Whether the provider marked the log as removed.
+    pub removed: bool,
+}
+
 /// Decode a Chainlink `AnswerUpdated` log.
 pub fn decode_answer_updated(log: &RpcLog) -> Result<AnswerUpdated, ChainlinkEventDecodeError> {
     require_topic(log, ANSWER_UPDATED_TOPIC)?;
@@ -174,6 +199,36 @@ pub fn decode_answer_updated(log: &RpcLog) -> Result<AnswerUpdated, ChainlinkEve
         current: topic_i256(log.topics()[1]),
         round_id: topic_u256(log.topics()[2]),
         updated_at: u256_to_u64(data, "updated_at")?,
+        block_number: log.block_number,
+        log_index: log.log_index,
+        removed: log.removed,
+    })
+}
+
+/// Decode a RedStone `ValueUpdate` log.
+#[cfg(feature = "redstone")]
+pub fn decode_redstone_value_update(
+    log: &RpcLog,
+) -> Result<RedstoneValueUpdate, ChainlinkEventDecodeError> {
+    require_topic(log, REDSTONE_VALUE_UPDATE_TOPIC)?;
+    require_topic_count(log, 1)?;
+    let data = log.inner.data.data.as_ref();
+    if data.len() != 96 {
+        return Err(ChainlinkEventDecodeError::WrongDataLength {
+            expected: 96,
+            actual: data.len(),
+        });
+    }
+
+    let value = U256::from_be_slice(&data[0..32]);
+    let data_feed_id = B256::from_slice(&data[32..64]);
+    let updated_at = u256_to_u64(U256::from_be_slice(&data[64..96]), "updated_at")?;
+
+    Ok(RedstoneValueUpdate {
+        adapter: log.address(),
+        data_feed_id,
+        value,
+        updated_at,
         block_number: log.block_number,
         log_index: log.log_index,
         removed: log.removed,

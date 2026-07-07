@@ -980,6 +980,12 @@ pub enum OracleAdapterSkipReason {
         /// Classified discovery or compatibility error.
         error: String,
     },
+    /// The RedStone push source variant is not supported by this adapter.
+    #[cfg(feature = "redstone")]
+    UnsupportedRedstoneSource {
+        /// Classified discovery or compatibility error.
+        error: String,
+    },
 }
 
 impl OracleAdapterBuilder {
@@ -1072,6 +1078,10 @@ impl std::fmt::Display for OracleAdapterSkipReason {
             }
             Self::UnsupportedEulerSource { error } => {
                 write!(f, "unsupported Euler oracle source ({error})")
+            }
+            #[cfg(feature = "redstone")]
+            Self::UnsupportedRedstoneSource { error } => {
+                write!(f, "unsupported RedStone oracle source ({error})")
             }
         }
     }

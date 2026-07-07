@@ -456,6 +456,7 @@ fn log_interest(aggregator: Address, topic: B256) -> ReactiveInterest<Ethereum> 
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_answer_updated_dependency_storage_effect(
     storage_sync: &OracleStorageSync,
     effects: &mut Vec<ReactiveEffect>,
@@ -609,6 +610,7 @@ fn prepend_aggregator_purge(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn answer_updated_price_update(
     registration: &FeedRegistration,
     aggregator: Address,
@@ -638,6 +640,7 @@ fn answer_updated_price_update(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ocr2_price_update(
     registration: &FeedRegistration,
     aggregator: Address,
@@ -669,6 +672,7 @@ fn ocr2_price_update(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ocr1_price_update(
     registration: &FeedRegistration,
     aggregator: Address,

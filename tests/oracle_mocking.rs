@@ -74,7 +74,7 @@ async fn overlay_mock_oracle_price_writes_detected_ocr2_slots_without_mutating_c
     let registration = ocr2_registration(proxy, aggregator);
     let current_round = (U256::from(1_u64) << 64) | U256::from(7_u64);
     let runtime =
-        runtime_with_registration(registration, round(current_round, 2_000_00000000, 100));
+        runtime_with_registration(registration, round(current_round, 200_000_000_000, 100));
 
     let mut cache = mocked_cache().await;
     cache
@@ -94,7 +94,7 @@ async fn overlay_mock_oracle_price_writes_detected_ocr2_slots_without_mutating_c
             &cache,
             &runtime,
             "eth-usd",
-            OraclePriceMock::new(I256::unchecked_from(1_750_00000000_i64)).updated_at(200),
+            OraclePriceMock::new(I256::unchecked_from(175_000_000_000_i64)).updated_at(200),
         )
         .expect("mock price");
 
@@ -119,7 +119,7 @@ async fn overlay_mock_oracle_price_writes_detected_ocr2_slots_without_mutating_c
     assert_eq!(
         transmission,
         ChainlinkOcr2StorageAdapter::pack_transmission_from_event(
-            I256::unchecked_from(1_750_00000000_i64),
+            I256::unchecked_from(175_000_000_000_i64),
             200,
         )
         .expect("packed transmission")
