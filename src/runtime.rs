@@ -641,6 +641,10 @@ impl<P> OracleRuntime<P> {
         &mut self.tracker
     }
 
+    pub(crate) fn storage_sync(&self) -> &OracleStorageSync {
+        &self.storage_sync
+    }
+
     /// Build a fresh built-in Chainlink-compatible reactive handler from current registrations.
     ///
     /// Adapter plugin handlers are not included. Use [`Self::reactive_handlers`],
@@ -1292,14 +1296,17 @@ fn prewarm_oracle_storage(
 
 struct OracleSlotColdStartPlanner {
     slots: Vec<(Address, U256)>,
+    slot_set: BTreeSet<(Address, U256)>,
     discover: Vec<ColdStartCall>,
     verified_discovered_slots: bool,
 }
 
 impl OracleSlotColdStartPlanner {
     fn new(slots: Vec<(Address, U256)>, discover: Vec<ColdStartCall>) -> Self {
+        let slot_set = slots.iter().copied().collect();
         Self {
             slots,
+            slot_set,
             discover,
             verified_discovered_slots: false,
         }
@@ -1325,7 +1332,7 @@ impl ColdStartPlanner for OracleSlotColdStartPlanner {
             .discovered
             .iter()
             .flat_map(|discovered| discovered.access.slots.iter().copied())
-            .filter(|slot| !self.slots.contains(slot))
+            .filter(|slot| !self.slot_set.contains(slot))
             .collect::<Vec<_>>();
         slots.sort_unstable();
         slots.dedup();

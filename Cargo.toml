@@ -28,8 +28,8 @@ live-tests = ["alloy-provider/ws"]
 
 [dependencies]
 # Companion crate, published on crates.io. The live AlloySubscriber, cold-start
-# updates, and reactive runtime this crate relies on are in the public 0.2.0 release.
-evm-fork-cache = "0.2.0"
+# updates, and reactive runtime this crate relies on are in the public release.
+evm-fork-cache = "0.2.1"
 
 alloy-eips = "1.0.38"
 alloy-network = "1.0.38"

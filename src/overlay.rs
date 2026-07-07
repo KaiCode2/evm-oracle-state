@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use alloy_primitives::{Address, B256, Bytes, I256, U256, Uint};
 use alloy_sol_types::{SolCall, sol};
 
@@ -50,12 +52,36 @@ use PythInterface::{getPriceNoOlderThanCall, getPriceUnsafeCall};
 /// Simulation-facing ABI call overlay backed by typed oracle state.
 pub struct OracleReadOverlay<'a> {
     tracker: &'a OracleTracker,
+    pyth_feeds: BTreeMap<(Address, B256), PythOverlayFeed>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PythOverlayFeed {
+    proxy: Address,
+    expo: i32,
+    conf: u64,
 }
 
 impl<'a> OracleReadOverlay<'a> {
     /// Create a new read overlay over the current tracker state.
     pub fn new(tracker: &'a OracleTracker) -> Self {
-        Self { tracker }
+        let mut pyth_feeds = BTreeMap::new();
+        for registration in tracker.registrations() {
+            let Some((pyth, price_id, expo, conf)) = registration.source.pyth_source() else {
+                continue;
+            };
+            pyth_feeds
+                .entry((pyth, price_id))
+                .or_insert(PythOverlayFeed {
+                    proxy: registration.proxy,
+                    expo,
+                    conf,
+                });
+        }
+        Self {
+            tracker,
+            pyth_feeds,
+        }
     }
 
     /// Try to serve a Chainlink proxy view call from typed oracle state.
@@ -183,14 +209,9 @@ impl<'a> OracleReadOverlay<'a> {
         target: Address,
         price_id: B256,
     ) -> Option<(&OracleSnapshot, i32, u64)> {
-        self.tracker.registrations().find_map(|registration| {
-            let (pyth, registered_price_id, expo, conf) = registration.source.pyth_source()?;
-            if pyth != target || registered_price_id != price_id {
-                return None;
-            }
-            let snapshot = self.tracker.latest(registration.proxy)?;
-            Some((snapshot, expo, conf))
-        })
+        let feed = self.pyth_feeds.get(&(target, price_id))?;
+        let snapshot = self.tracker.latest(feed.proxy)?;
+        Some((snapshot, feed.expo, feed.conf))
     }
 }
 

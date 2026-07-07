@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -300,11 +301,12 @@ impl<'a> EvmCacheChainlinkReader<'a> {
         cores: &[Option<Result<ChainlinkCoreRead, OracleError>>],
     ) -> Option<Vec<Option<AggregatorLayoutEvidence>>> {
         let mut aggregators = Vec::new();
+        let mut seen_aggregators = BTreeSet::new();
         for core in cores.iter().filter_map(|core| match core {
             Some(Ok(core)) => core.aggregator,
             _ => None,
         }) {
-            if !aggregators.contains(&core) {
+            if seen_aggregators.insert(core) {
                 aggregators.push(core);
             }
         }
@@ -313,8 +315,8 @@ impl<'a> EvmCacheChainlinkReader<'a> {
         }
 
         let mut type_and_versions = self.read_type_and_versions_multicall(&aggregators)?;
-        let mut evidence_by_aggregator = Vec::with_capacity(aggregators.len());
-        for (index, aggregator) in aggregators.into_iter().enumerate() {
+        let mut evidence_by_aggregator = BTreeMap::new();
+        for (index, aggregator) in aggregators.iter().copied().enumerate() {
             let evidence = type_and_versions
                 .get_mut(index)
                 .and_then(Option::take)
@@ -326,7 +328,7 @@ impl<'a> EvmCacheChainlinkReader<'a> {
                     )
                 })
                 .unwrap_or_else(|| AggregatorLayoutEvidence::unknown(aggregator, None));
-            evidence_by_aggregator.push((aggregator, evidence));
+            evidence_by_aggregator.insert(aggregator, evidence);
         }
 
         Some(
@@ -337,9 +339,7 @@ impl<'a> EvmCacheChainlinkReader<'a> {
                         Some(Ok(core)) => core.aggregator?,
                         _ => return None,
                     };
-                    evidence_by_aggregator.iter().find_map(|(known, evidence)| {
-                        (*known == aggregator).then(|| evidence.clone())
-                    })
+                    evidence_by_aggregator.get(&aggregator).cloned()
                 })
                 .collect(),
         )
@@ -580,7 +580,7 @@ impl<'a> EvmCacheChainlinkReader<'a> {
         if calls.is_empty() {
             return Some(Vec::new());
         }
-        if let Some(results) = self.execute_direct_rpc_multicall(calls.clone()) {
+        if let Some(results) = self.execute_direct_rpc_multicall(&calls) {
             return Some(results);
         }
         let mut cache = self.cache.borrow_mut();
@@ -589,14 +589,14 @@ impl<'a> EvmCacheChainlinkReader<'a> {
 
     fn execute_direct_rpc_multicall(
         &self,
-        calls: Vec<(Address, Bytes, bool)>,
+        calls: &[(Address, Bytes, bool)],
     ) -> Option<Vec<IMulticall3::Result>> {
         let calls = calls
-            .into_iter()
+            .iter()
             .map(|(target, call_data, allow_failure)| IMulticall3::Call3 {
-                target,
-                allowFailure: allow_failure,
-                callData: call_data,
+                target: *target,
+                allowFailure: *allow_failure,
+                callData: call_data.clone(),
             })
             .collect::<Vec<_>>();
         let call = IMulticall3::aggregate3Call { calls };

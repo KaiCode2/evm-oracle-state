@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use alloy_primitives::{Address, I256, U256, keccak256};
 use evm_fork_cache::{StateUpdate, StateView};
@@ -584,10 +584,11 @@ impl OracleStorageSync {
         registrations: impl IntoIterator<Item = &'a FeedRegistration>,
     ) -> Vec<(Address, U256)> {
         let mut slots = Vec::new();
+        let mut seen = BTreeSet::new();
         for registration in registrations {
             for adapter in &self.adapters {
                 for slot in adapter.warm_slots_for_registration(registration) {
-                    if !slots.contains(&slot) {
+                    if seen.insert(slot) {
                         slots.push(slot);
                     }
                 }

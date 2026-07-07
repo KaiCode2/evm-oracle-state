@@ -226,7 +226,7 @@ assert_eq!(warmup.failed_slots.len(), 0);
 ```
 
 `prewarm_storage` uses `evm-fork-cache`'s installed storage batch fetcher. In
-v0.2.0 that fetcher defaults to bulk `eth_call` storage extraction: target
+v0.2.1 that fetcher defaults to bulk `eth_call` storage extraction: target
 contracts are temporarily run with a tiny extractor bytecode that performs raw
 `SLOAD`s for the requested slots, and Multicall3 dispatches many target
 contracts in a small number of calls. This is the fast path for known OCR hot
@@ -254,7 +254,7 @@ Call `.disable_storage_warmup()` when a caller intentionally wants lazy
 fallback behavior, or call `oracle.storage_warmup_slots()` to inspect the exact
 declared hot slots. The default mode uses `EvmCache::prewarm_slots`; use
 `.storage_cold_start()` or `oracle.cold_start_storage(&mut cache)` when the
-caller wants v0.2.0 cold-start verification through `EvmCache::run_cold_start`.
+caller wants v0.2.1 cold-start verification through `EvmCache::run_cold_start`.
 Cold-start mode first verifies declared hot slots, then runs discovery calls
 such as `latestRoundData()` and bulk-verifies any newly discovered slots in a
 second round. Known storage goes through raw SLOAD extraction; dynamic
@@ -324,7 +324,7 @@ assert_eq!(removed.removed_handler_ids.len(), removed.handler_ids.len());
 Use `install_handlers(&mut engine)` for continuity-safe registration that
 backfills from the runtime's last canonical block, or
 `install_handlers_with_backfill(&mut engine, SubscriberBackfill::from_block(n))`
-for an explicit historical anchor. This is the preferred v0.2.0 path for
+for an explicit historical anchor. This is the preferred v0.2.1 path for
 registering/unregistering oracle tracking at runtime; the older
 `register_subscriber` helper remains a full-replacement bootstrap path.
 
@@ -383,6 +383,35 @@ let two_eth = TokenAmount::new(
 );
 let usd_value = price.value_of(two_eth, 18)?;
 ```
+
+### Overlay-Scoped Price Mocks
+
+For liquidation and risk-engine tests, create an `evm-fork-cache` mock overlay
+and write an oracle price only into that simulation layer:
+
+```rust
+use alloy_primitives::I256;
+use evm_oracle_state::{OracleOverlayMockExt, OraclePriceMock};
+
+let mut sim = cache.mock_overlay();
+let report = sim.mock_oracle_price(
+    &cache,
+    &oracle,
+    "eth-usd",
+    OraclePriceMock::new(I256::unchecked_from(1_750_00000000_i64))
+        .updated_at(1_700_000_200),
+)?;
+assert!(report.applied());
+
+// run liquidation/search simulations through `sim`; dropping it discards mocks.
+```
+
+For detected Chainlink OCR1/OCR2 feeds, this applies the same storage slots that
+a live oracle event would update, preserving packed hot-slot bits from the cache.
+If the feed has no supported direct-storage layout or the required hot slot has
+not been warmed, `applied()` is `false` and the cache remains untouched. Use
+`oracle.prewarm_storage(&mut cache)` before creating the overlay when the runtime
+was not built with storage warmup enabled.
 
 When an `EvmCache` is already present, the cache-native adapter provides the
 preferred lower-level registration path:

@@ -16,6 +16,7 @@ mod euler;
 mod events;
 mod feed;
 mod layout;
+mod mocking;
 #[cfg(feature = "morpho")]
 mod morpho;
 mod overlay;
@@ -66,6 +67,7 @@ pub use layout::{
     AggregatorLayout, AggregatorLayoutConfidence, AggregatorLayoutEvidence,
     classify_type_and_version,
 };
+pub use mocking::{OracleMockError, OracleMockReport, OracleOverlayMockExt, OraclePriceMock};
 #[cfg(feature = "morpho")]
 pub use morpho::{MorphoBlueMarket, MorphoBlueOracleAdapter, MorphoMarketParams};
 pub use overlay::OracleReadOverlay;
