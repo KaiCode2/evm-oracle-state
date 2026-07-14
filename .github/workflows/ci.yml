@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "1"
+  # Debug info dominates target/ size for this dependency graph (revm + alloy
+  # + websocket/http stacks): a local multi-feature run accumulated >60GiB of
+  # dev-profile artifacts. Disabling debuginfo in CI keeps the multi-feature
+  # Validate sequence inside the runner's disk budget without changing what
+  # the tests exercise.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The default/adapter/all-features test runs plus clippy, example
+      # checks, docs, and the package verify build accumulate several
+      # feature-hashed build trees in one job. Standard runners start with
+      # ~14GB free; reclaim the preinstalled bloat up front so the final
+      # steps do not die with "No space left on device" at link time.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      # 1.88.0 is the declared MSRV (Cargo.toml `rust-version`); pinning the
+      # whole validate matrix to it doubles as the MSRV gate, so a >1.88 API
+      # or a dependency MSRV bump cannot pass CI while breaking downstream
+      # consumers pinned to 1.88.
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.88.0
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test default features
+        run: cargo test --locked
+
+      - name: Test all adapter features
+        run: cargo test --locked --features aave,morpho,euler,pyth,redstone
+
+      # `--all-features` additionally enables `live-tests`; the RPC-gated live
+      # tests skip cleanly when no RPC endpoint is configured, so this passes
+      # offline.
+      - name: Test all features
+        run: cargo test --locked --all-features
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --features aave,morpho,euler,pyth,redstone -- -D warnings
+
+      - name: Check examples
+        run: cargo check --locked --examples --features aave,morpho,euler,pyth,redstone
+
+      - name: Docs
+        run: cargo doc --locked --no-deps --features aave,morpho,euler,pyth,redstone
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Package
+        run: cargo package --locked
+
+  # Per-adapter ISOLATION matrix. The `validate` job builds every adapter
+  # feature together, which can mask an adapter whose code/imports are not
+  # correctly `#[cfg]`-gated on its own feature (a `--features <one-adapter>`
+  # build then fails even though the combined build is green — exactly the
+  # class of bug all-features testing cannot catch). Building and linting each
+  # adapter feature on its own surfaces that immediately. Clippy
+  # `--all-targets` also compiles the tests/examples that cfg-gate themselves
+  # on the isolated feature, for extra lint coverage.
+  isolation:
+    name: clippy (isolated · ${{ matrix.feature }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature:
+          - aave
+          - morpho
+          - euler
+          - pyth
+          - redstone
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component clippy
+          rustup default 1.88.0
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: Clippy (${{ matrix.feature }} only)
+        run: cargo clippy --locked --no-default-features --features ${{ matrix.feature }} --all-targets -- -D warnings
+
+  live-smoke:
+    name: Release live smoke
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    env:
+      ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+      ETH_WS_RPC_URL: ${{ secrets.ETH_WS_RPC_URL }}
+      PYTH_CONTRACT: ${{ secrets.PYTH_CONTRACT }}
+      PYTH_PRICE_ID: ${{ secrets.PYTH_PRICE_ID }}
+      REDSTONE_PRICE_FEED: ${{ secrets.REDSTONE_PRICE_FEED }}
+      REDSTONE_ADAPTER: ${{ secrets.REDSTONE_ADAPTER }}
+      REDSTONE_DATA_FEED_ID: ${{ secrets.REDSTONE_DATA_FEED_ID }}
+      MORPHO_MARKET_ID: ${{ secrets.MORPHO_MARKET_ID }}
+      MORPHO_ORACLE: ${{ secrets.MORPHO_ORACLE }}
+      EULER_ROUTER: ${{ secrets.EULER_ROUTER }}
+      EULER_ORACLE: ${{ secrets.EULER_ORACLE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+
+      - name: Skip when ETH_RPC_URL is not configured
+        if: env.ETH_RPC_URL == ''
+        run: echo "ETH_RPC_URL secret is not configured; skipping release live smoke."
+
+      - name: Run release live smoke
+        if: env.ETH_RPC_URL != ''
+        run: scripts/release_live_smoke.sh

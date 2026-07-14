@@ -1,0 +1,113 @@
+[package]
+name = "evm-oracle-state"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "EVM-backed Chainlink-style oracle state tracking over evm-fork-cache"
+keywords = ["evm", "oracle", "chainlink", "defi"]
+categories = ["cryptography::cryptocurrencies", "simulation", "caching"]
+readme = "README.md"
+repository = "https://github.com/KaiCode2/evm-oracle-state"
+documentation = "https://docs.rs/evm-oracle-state"
+
+# Ship a lean crate: keep src + runnable examples + the user-facing docs/
+# guides, README, and licenses; drop local runtime state, the internal test
+# suite, the maintainer live-smoke script, maintainer docs, and CI config.
+# (gitignore-style patterns, relative to the package root.)
+#
+# NOTE: `exclude` must stay in the `[package]` table. If it is written *after*
+# a `[package.metadata.*]` header, TOML reparents it to that sub-table and
+# Cargo silently ignores it — shipping everything.
+exclude = [
+    ".env",
+    ".env.*",
+    "target/",
+    ".github/",
+    "tests/",
+    "scripts/",
+    "RELEASING.md",
+]
+
+# Build docs.rs with every adapter feature enabled so the published docs expose
+# Chainlink, Aave, Morpho, Euler, Pyth, RedStone, and live-test surfaces, and
+# pass `--cfg docsrs` so `doc_cfg` (see lib.rs) stamps feature badges on gated
+# items.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Standalone workspace root: keeps this crate from being absorbed by any
+# ancestor-directory workspace and gives it its own Cargo.lock.
+[workspace]
+
+[features]
+default = []
+aave = []
+morpho = []
+euler = []
+pyth = []
+redstone = []
+live-tests = ["alloy-provider/ws"]
+
+[dependencies]
+evm-fork-cache = "0.3.0"
+
+alloy-eips = "1.0.38"
+alloy-network = "1.0.38"
+alloy-primitives = { version = "1.4", features = ["map"] }
+alloy-provider = "1.0.38"
+alloy-rpc-types-eth = "1.0.38"
+alloy-sol-types = "1.4"
+
+thiserror = "2.0"
+tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+tracing = "0.1.41"
+
+[dev-dependencies]
+alloy-provider = { version = "1.0.38", features = ["ws"] }
+alloy-rpc-client = "1.0.38"
+alloy-transport = "1.0.38"
+# Benchmark harness. `default-features = false` drops criterion's `rayon` +
+# `plotters` deps — keeps the build lean and, since the crate deliberately ships
+# without rayon, avoids reintroducing it even in the dev/bench build.
+criterion = { version = "0.5", default-features = false }
+revm = "34.0.0"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+
+# Fully-OFFLINE oracle hot-path micro-benchmarks (mock-backed, no RPC, no env):
+# warm-slot dedupe, overlay reads, and direct-sync write planning. Runs anywhere,
+# including CI, for regression tracking.
+[[bench]]
+name = "oracle_hot_path"
+harness = false
+
+# Feature-gated live demos. Declaring `required-features` makes cargo skip
+# (rather than fail) these targets when their adapter feature is off, and
+# documents the flag each demo needs; the remaining examples are ungated and
+# auto-discovered. All live demos are additionally env-gated: they print a
+# skip message and exit 0 when their RPC env vars are unset.
+
+# Cache-backed Aave V3 health-factor demo: discovers Aave oracle sources for a
+# user's active reserves, recomputes the health factor on live oracle hooks.
+[[example]]
+name = "aave_v3_health_factor"
+required-features = ["aave"]
+
+# Cache-backed Morpho Blue + Euler quote tracking demo with live
+# health-factor-style value math on oracle hooks.
+[[example]]
+name = "morpho_euler_reactive_value"
+required-features = ["morpho", "euler"]
+
+# Pyth push-feed demo: registers price ids on a shared Pyth contract and
+# prints live PriceFeedUpdate-driven hooks.
+[[example]]
+name = "pyth_push_demo"
+required-features = ["pyth"]
+
+# RedStone push-feed demo: cold-starts a price-feed wrapper and prints live
+# ValueUpdate / merged AnswerUpdated hooks.
+[[example]]
+name = "redstone_push_demo"
+required-features = ["redstone"]
