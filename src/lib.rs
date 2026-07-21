@@ -65,6 +65,10 @@
 //!   [`MorphoBlueOracleAdapter`] (`morpho`), [`EulerOracleAdapter`]
 //!   (`euler`), [`PythOracleAdapter`] (`pyth`), and
 //!   [`RedstoneOracleAdapter`] (`redstone`).
+//! - [`PendingOracleRuntime`] (`pending-oracle-updates`) — an independent,
+//!   opt-in speculative channel over the existing feed registry, with pluggable
+//!   oracle decoders and transport sources. It never mutates canonical tracker
+//!   state or confirmed hooks.
 //!
 //! See the crate's `examples/local_oracle_lifecycle.rs` for the
 //! compile-checked quickstart: a deterministic, RPC-free walk through
@@ -112,6 +116,8 @@ mod mocking;
 #[cfg(feature = "morpho")]
 mod morpho;
 mod overlay;
+#[cfg(feature = "pending-oracle-updates")]
+mod pending;
 mod price;
 mod provider;
 #[cfg(feature = "pyth")]
@@ -171,6 +177,30 @@ pub use mocking::{OracleMockError, OracleMockReport, OracleOverlayMockExt, Oracl
 #[cfg(feature = "morpho")]
 pub use morpho::{MorphoBlueMarket, MorphoBlueOracleAdapter, MorphoMarketParams};
 pub use overlay::OracleReadOverlay;
+#[cfg(feature = "pending-oracle-ethereum")]
+pub use pending::AlchemyPendingTransactionSource;
+#[cfg(feature = "pending-oracle-mev-share")]
+pub use pending::MevSharePendingTransactionSource;
+#[cfg(feature = "pending-oracle-updates")]
+pub use pending::{
+    CHAINLINK_FORWARD_SELECTOR, CHAINLINK_TRANSMIT_SECONDARY_SELECTOR, CHAINLINK_TRANSMIT_SELECTOR,
+    ChainlinkPendingAdapter, ChainlinkPendingReport, DecodedChainlinkOcr2,
+    ETHEREUM_MAINNET_CHAIN_ID, PendingFeedFilter, PendingOracleAdapter, PendingOracleAdapterError,
+    PendingOracleAdapterFailure, PendingOracleAdapterObservation, PendingOracleCandidateOutcome,
+    PendingOracleCandidateReport, PendingOracleCandidateSource, PendingOracleConfig,
+    PendingOracleCoverageGap, PendingOracleDecodeError, PendingOracleEvent, PendingOracleEvidence,
+    PendingOracleInterest, PendingOracleObserveOutcome, PendingOracleOrderingHandle,
+    PendingOraclePublisher, PendingOracleRecvError, PendingOracleResolution,
+    PendingOracleResolutionKind, PendingOracleResolveOutcome, PendingOracleRoute,
+    PendingOracleRuntime, PendingOracleSimulationFidelity, PendingOracleSimulationMaterial,
+    PendingOracleSource, PendingOracleSourceDescriptor, PendingOracleSourceError,
+    PendingOracleSourceFuture, PendingOracleSourceHealth, PendingOracleSourceId,
+    PendingOracleSourceSession, PendingOracleSourceSink, PendingOracleSourceState,
+    PendingOracleStatus, PendingOracleStreamEvent, PendingOracleSubscription,
+    PendingOracleTransmission, PendingOracleTransmissionId, PendingOracleTransmissionStatus,
+    PendingOracleUpdate, PendingOracleUpdateId, PendingOracleValue, PendingTransportCandidate,
+    decode_chainlink_ocr2_calldata,
+};
 pub use price::{CheckedPrice, OraclePrice, PricePolicy, PricePolicyViolation};
 pub use provider::{ChainlinkFeedProvider, OracleBlockRef, ProviderFuture};
 #[cfg(feature = "pyth")]

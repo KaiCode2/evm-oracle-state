@@ -27,6 +27,15 @@ use crate::{
     OracleStorageSync, OracleTracker, RoundData, StalenessPolicy,
 };
 
+#[cfg(feature = "pending-oracle-updates")]
+use evm_fork_cache::reactive::ReactiveInput;
+
+#[cfg(feature = "pending-oracle-updates")]
+use crate::{
+    PendingOracleAdapter, PendingOracleCandidateSource, PendingOracleConfig, PendingOracleRuntime,
+    PendingOracleSourceError, PendingOracleSourceSession,
+};
+
 type OracleEventCallback = Arc<dyn Fn(&OracleHookEvent) + Send + Sync>;
 
 alloy_sol_types::sol! {
@@ -123,6 +132,10 @@ pub struct OracleRuntimeBuilder<P> {
     now_timestamp: Option<u64>,
     storage_sync: OracleStorageSync,
     callbacks: Vec<OracleEventCallback>,
+    #[cfg(feature = "pending-oracle-updates")]
+    pending_config: Option<PendingOracleConfig>,
+    #[cfg(feature = "pending-oracle-updates")]
+    pending_adapters: Vec<Arc<dyn PendingOracleAdapter>>,
 }
 
 /// Cache-native runtime builder with first-class oracle adapter plugins.
@@ -135,6 +148,10 @@ pub struct OracleCacheRuntimeBuilder {
     code_registry: OracleCodeRegistry,
     code_warmup_policy: OracleCodeWarmupPolicy,
     callbacks: Vec<OracleEventCallback>,
+    #[cfg(feature = "pending-oracle-updates")]
+    pending_config: Option<PendingOracleConfig>,
+    #[cfg(feature = "pending-oracle-updates")]
+    pending_adapters: Vec<Arc<dyn PendingOracleAdapter>>,
 }
 
 /// Best-effort cache-native oracle runtime build report.
@@ -301,6 +318,10 @@ impl<P> OracleRuntimeBuilder<P> {
             now_timestamp: None,
             storage_sync: OracleStorageSync::chainlink_defaults(),
             callbacks: Vec::new(),
+            #[cfg(feature = "pending-oracle-updates")]
+            pending_config: None,
+            #[cfg(feature = "pending-oracle-updates")]
+            pending_adapters: Vec::new(),
         }
     }
 
@@ -363,6 +384,23 @@ impl<P> OracleRuntimeBuilder<P> {
             }
         })
     }
+
+    /// Enable speculative pending updates for the feeds registered by this builder.
+    #[cfg(feature = "pending-oracle-updates")]
+    pub fn pending_updates(mut self, config: PendingOracleConfig) -> Self {
+        self.pending_config = Some(config);
+        self
+    }
+
+    /// Install an additional oracle-family decoder for the pending channel.
+    #[cfg(feature = "pending-oracle-updates")]
+    pub fn pending_adapter<A>(mut self, adapter: A) -> Self
+    where
+        A: PendingOracleAdapter,
+    {
+        self.pending_adapters.push(Arc::new(adapter));
+        self
+    }
 }
 
 impl<P: ChainlinkFeedProvider> OracleRuntimeBuilder<P> {
@@ -389,12 +427,26 @@ impl<P: ChainlinkFeedProvider> OracleRuntimeBuilder<P> {
                 .await?;
         }
 
+        let tracker = OracleTracker::new(registry);
+        #[cfg(feature = "pending-oracle-updates")]
+        let pending = self.pending_config.map(|config| {
+            PendingOracleRuntime::from_registrations(
+                config,
+                tracker.registrations_iter(),
+                self.pending_adapters,
+            )
+        });
+
         Ok(OracleRuntime {
             provider: self.provider,
-            tracker: OracleTracker::new(registry),
+            tracker,
             storage_sync: self.storage_sync,
             callbacks: self.callbacks,
             adapter_states: Vec::new(),
+            #[cfg(feature = "pending-oracle-updates")]
+            pending,
+            #[cfg(feature = "pending-oracle-updates")]
+            pending_source_sessions: Vec::new(),
         })
     }
 }
@@ -410,6 +462,10 @@ impl Default for OracleCacheRuntimeBuilder {
             code_registry: OracleCodeRegistry::default(),
             code_warmup_policy: OracleCodeWarmupPolicy::default(),
             callbacks: Vec::new(),
+            #[cfg(feature = "pending-oracle-updates")]
+            pending_config: None,
+            #[cfg(feature = "pending-oracle-updates")]
+            pending_adapters: Vec::new(),
         }
     }
 }
@@ -534,6 +590,23 @@ impl OracleCacheRuntimeBuilder {
         })
     }
 
+    /// Enable speculative pending updates for adapter-discovered registrations.
+    #[cfg(feature = "pending-oracle-updates")]
+    pub fn pending_updates(mut self, config: PendingOracleConfig) -> Self {
+        self.pending_config = Some(config);
+        self
+    }
+
+    /// Install an additional oracle-family decoder for the pending channel.
+    #[cfg(feature = "pending-oracle-updates")]
+    pub fn pending_adapter<A>(mut self, adapter: A) -> Self
+    where
+        A: PendingOracleAdapter,
+    {
+        self.pending_adapters.push(Arc::new(adapter));
+        self
+    }
+
     /// Register adapter-discovered feeds and construct the runtime.
     ///
     /// # Errors
@@ -613,6 +686,14 @@ impl OracleCacheRuntimeBuilder {
         let mut feed_statuses = storage_warmup.feed_statuses.clone();
         feed_statuses.extend(skipped.iter().map(skipped_feed_readiness));
         let tracker = OracleTracker::from_registrations_at_timestamp(seeded, now_timestamp)?;
+        #[cfg(feature = "pending-oracle-updates")]
+        let pending = self.pending_config.map(|config| {
+            PendingOracleRuntime::from_registrations(
+                config,
+                tracker.registrations_iter(),
+                self.pending_adapters,
+            )
+        });
         Ok(OracleCacheRuntimeBuildReport {
             runtime: OracleRuntime {
                 provider: (),
@@ -620,6 +701,10 @@ impl OracleCacheRuntimeBuilder {
                 storage_sync: self.storage_sync,
                 callbacks: self.callbacks,
                 adapter_states: discovered_by_adapter,
+                #[cfg(feature = "pending-oracle-updates")]
+                pending,
+                #[cfg(feature = "pending-oracle-updates")]
+                pending_source_sessions: Vec::new(),
             },
             skipped,
             feed_statuses,
@@ -636,17 +721,29 @@ pub struct OracleRuntime<P> {
     storage_sync: OracleStorageSync,
     callbacks: Vec<OracleEventCallback>,
     adapter_states: Vec<OracleAdapterRuntimeState>,
+    #[cfg(feature = "pending-oracle-updates")]
+    pending: Option<PendingOracleRuntime>,
+    #[cfg(feature = "pending-oracle-updates")]
+    pending_source_sessions: Vec<PendingOracleSourceSession>,
 }
 
 impl<P: fmt::Debug> fmt::Debug for OracleRuntime<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OracleRuntime")
+        let mut debug = f.debug_struct("OracleRuntime");
+        debug
             .field("provider", &self.provider)
             .field("tracker", &self.tracker)
             .field("storage_sync", &self.storage_sync)
             .field("callbacks_len", &self.callbacks.len())
-            .field("adapter_states", &self.adapter_states)
-            .finish()
+            .field("adapter_states", &self.adapter_states);
+        #[cfg(feature = "pending-oracle-updates")]
+        debug.field("pending", &self.pending);
+        #[cfg(feature = "pending-oracle-updates")]
+        debug.field(
+            "pending_source_sessions_len",
+            &self.pending_source_sessions.len(),
+        );
+        debug.finish()
     }
 }
 
@@ -686,6 +783,30 @@ impl<P> OracleRuntime<P> {
     /// Return feed/runtime readiness for all registered feeds.
     pub fn feed_readiness(&self) -> Vec<OracleFeedReadinessReport> {
         self.tracker.feed_readiness()
+    }
+
+    /// Borrow the opt-in speculative pending-update runtime, when enabled.
+    #[cfg(feature = "pending-oracle-updates")]
+    pub fn pending_updates(&self) -> Option<&PendingOracleRuntime> {
+        self.pending.as_ref()
+    }
+
+    /// Start and retain a pending candidate source for the lifetime of this runtime.
+    ///
+    /// The corresponding source family must be enabled in the runtime's
+    /// [`PendingOracleConfig`]. Dropping the runtime requests source shutdown.
+    #[cfg(feature = "pending-oracle-updates")]
+    pub fn start_pending_source<S>(&mut self, source: S) -> Result<(), PendingOracleSourceError>
+    where
+        S: PendingOracleCandidateSource,
+    {
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or(PendingOracleSourceError::PendingUpdatesDisabled)?;
+        let session = pending.start_source(source)?;
+        self.pending_source_sessions.push(session);
+        Ok(())
     }
 
     pub(crate) fn storage_sync(&self) -> &OracleStorageSync {
@@ -968,8 +1089,24 @@ impl<P> OracleRuntime<P> {
         let Some(batch) = subscriber.next_batch().await.map_err(runtime_error)? else {
             return Ok(None);
         };
+        #[cfg(feature = "pending-oracle-updates")]
+        let committed_logs = batch
+            .records()
+            .iter()
+            .filter_map(|record| match &record.input {
+                ReactiveInput::Log(log) => Some(log.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let report = runtime.ingest_batch(cache, batch).map_err(runtime_error)?;
-        self.apply_batch_report(&report).map(Some)
+        let typed = self.apply_batch_report(&report)?;
+        #[cfg(feature = "pending-oracle-updates")]
+        if let Some(pending) = &self.pending {
+            for log in &committed_logs {
+                pending.observe_confirmed_log(log);
+            }
+        }
+        Ok(Some(typed))
     }
 
     /// Build a read overlay over the current tracker state.
@@ -997,6 +1134,8 @@ impl<P> OracleRuntime<P> {
         let id = registration.id.clone();
         self.tracker
             .insert_seeded_registration(registration, round)?;
+        #[cfg(feature = "pending-oracle-updates")]
+        self.refresh_pending_scope();
         Ok(self.mutation_report([id], []))
     }
 
@@ -1027,6 +1166,8 @@ impl<P> OracleRuntime<P> {
         self.adapter_states[state_index]
             .registrations
             .push(registration);
+        #[cfg(feature = "pending-oracle-updates")]
+        self.refresh_pending_scope();
         Ok(self.mutation_report([id], []))
     }
 
@@ -1050,6 +1191,8 @@ impl<P> OracleRuntime<P> {
             .ok_or(OracleError::FeedNotFound)?;
         let id = removed.id.clone();
         self.remove_adapter_registration(id.clone());
+        #[cfg(feature = "pending-oracle-updates")]
+        self.refresh_pending_scope();
         Ok(self.mutation_report([], [id]))
     }
 
@@ -1069,6 +1212,8 @@ impl<P> OracleRuntime<P> {
             .ok_or(OracleError::FeedNotFound)?;
         let id = removed.id.clone();
         self.remove_adapter_registration(id.clone());
+        #[cfg(feature = "pending-oracle-updates")]
+        self.refresh_pending_scope();
         Ok(self.mutation_report([], [id]))
     }
 
@@ -1163,6 +1308,8 @@ impl<P> OracleRuntime<P> {
         {
             events.extend(result.hooks);
         }
+        #[cfg(feature = "pending-oracle-updates")]
+        self.refresh_pending_scope();
         self.emit(&events);
         Ok(events)
     }
@@ -1312,6 +1459,13 @@ impl<P> OracleRuntime<P> {
                 .retain(|registration| registration.id != id);
         }
     }
+
+    #[cfg(feature = "pending-oracle-updates")]
+    fn refresh_pending_scope(&mut self) {
+        if let Some(pending) = &mut self.pending {
+            pending.refresh(self.tracker.registrations_iter());
+        }
+    }
 }
 
 impl OracleRuntime<()> {
@@ -1339,6 +1493,10 @@ impl OracleRuntime<()> {
             storage_sync: OracleStorageSync::chainlink_defaults(),
             callbacks: Vec::new(),
             adapter_states: Vec::new(),
+            #[cfg(feature = "pending-oracle-updates")]
+            pending: None,
+            #[cfg(feature = "pending-oracle-updates")]
+            pending_source_sessions: Vec::new(),
         }
     }
 
@@ -1395,6 +1553,8 @@ impl OracleRuntime<()> {
         }
 
         self.push_adapter_state(adapter, registrations);
+        #[cfg(feature = "pending-oracle-updates")]
+        self.refresh_pending_scope();
         let mut feed_statuses =
             feed_readiness_from_registrations(self.tracker.registrations_iter());
         feed_statuses.extend(discovery.skipped.iter().map(skipped_feed_readiness));

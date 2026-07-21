@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-alpha.1] - 2026-07-21
+
+### Added
+
+- An opt-in `pending-oracle-updates` channel that projects the runtime's existing
+  feed registrations into a separate speculative stream without mutating
+  authoritative oracle snapshots or confirmed hooks.
+- A built-in Chainlink OCR2 pending adapter for direct, secondary, and forwarded
+  transmissions, including exact signed-envelope hash validation, report and
+  transaction deduplication, committed-log correlation, and searcher-oriented
+  ordering and simulation material.
+- Runtime-owned Alchemy full pending-transaction and Flashbots MEV-Share sources
+  behind the `pending-oracle-ethereum` and `pending-oracle-mev-share` features,
+  with explicit source health, reconnect gaps, and bounded receiver lag reports.
+- Public `PendingOracleAdapter` and `PendingOracleCandidateSource` extension
+  seams, explicit chain configuration, caller-defined transport identities, and
+  per-adapter routing failures that do not block other matching adapters.
+- A compile-checked pending-oracle example and a candid guide covering supported
+  feeds, chain boundaries, coverage limits, and downstream simulation handoff.
+
+### Changed
+
+- Advanced the crate to the `0.3.0-alpha.1` prerelease while retaining
+  `evm-fork-cache 0.3.0` as the published public dependency. Full pending
+  transaction ingestion remains deliberately separate from the confirmed
+  `evm-fork-cache` subscriber pipeline.
+
 ## [0.2.0] - 2026-07-14
 
 ### Added
@@ -148,5 +175,6 @@ Release-validation fixes that landed while preparing 0.1.0:
 - Curated fixture fix: the reactive smoke's MATIC/USD entry pointed at a
   mistyped (codeless) address; corrected to the verified on-chain proxy.
 
-[Unreleased]: https://github.com/KaiCode2/evm-oracle-state/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/KaiCode2/evm-oracle-state/compare/v0.3.0-alpha.1...HEAD
+[0.3.0-alpha.1]: https://github.com/KaiCode2/evm-oracle-state/releases/tag/v0.3.0-alpha.1
 [0.2.0]: https://github.com/KaiCode2/evm-oracle-state/releases/tag/v0.2.0

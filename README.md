@@ -99,6 +99,35 @@ Run the zero-setup, compile-checked version of this flow (no RPC required):
 cargo run --example local_oracle_lifecycle
 ```
 
+### Experimental Pending-Update Channel
+
+The `pending-oracle-updates` feature enables an opt-in speculative channel for
+searchers that want to simulate against an oracle value before its transaction
+lands. It reuses feeds already registered through
+`OracleRuntime::builder` or `OracleRuntime::cache_builder`, while keeping pending
+observations separate from authoritative snapshots and confirmed hooks. The
+initial decoder recognizes direct and forwarded Chainlink OCR2 transmissions;
+the public channel and event vocabulary remain oracle-agnostic.
+
+The confirmed `register_subscriber` factory deliberately remains committed-log
+only: `evm-fork-cache` 0.3 cannot hydrate the full pending transaction bodies
+needed here. Enable the separate `pending-oracle-ethereum` and/or
+`pending-oracle-mev-share` transport feature, then attach its runtime-owned source
+with `start_pending_source`. Both sources reuse the feeds already registered on
+the builder; users do not repeat a feed subscription. Neither source is a
+completeness guarantee. The built-in source presets target Ethereum mainnet;
+other chains require an explicit `PendingOracleConfig::for_chain(...)` and a
+transport with honest chain-specific ordering semantics. Chain or source
+mismatches fail closed.
+
+See [Pending Oracle Updates](docs/pending-oracle-updates.md) for the implemented
+surface, target capability model, and limitations. Run the offline,
+compile-checked integration example with:
+
+```bash
+cargo run --example pending_oracle_updates --features pending-oracle-updates
+```
+
 ## Benchmarks & Performance
 
 Full methodology, results, comparisons, and caveats live in

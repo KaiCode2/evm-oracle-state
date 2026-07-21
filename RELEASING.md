@@ -1,10 +1,8 @@
 # Releasing `evm-oracle-state`
 
-Maintainer checklist for cutting and publishing a release. During unreleased
-cross-crate development, the `evm-fork-cache 0.3.0` dependency uses the sibling
-path while retaining its version requirement. Before packaging, publish
-`evm-fork-cache 0.3.0`, remove the path override, refresh the lockfile, and then
-work the sections below in order.
+Maintainer checklist for cutting and publishing a release. The public
+`evm-fork-cache 0.3.0` dependency must resolve from crates.io with no sibling
+path override before packaging. Work the sections below in order.
 
 ## 1. Pre-publish verification
 
@@ -15,18 +13,18 @@ toolchain doubles as the MSRV gate for `rust-version = "1.88"`:
 ```bash
 cargo fmt --check
 cargo test --locked
-cargo test --locked --features aave,morpho,euler,pyth,redstone
+cargo test --locked --features aave,morpho,euler,pyth,redstone,pending-oracle-updates,pending-oracle-ethereum,pending-oracle-mev-share
 # --all-features additionally enables `live-tests`; the RPC-gated live tests
 # skip cleanly when no RPC endpoint is configured, so this must pass offline:
 cargo test --locked --all-features
-cargo clippy --locked --all-targets --features aave,morpho,euler,pyth,redstone -- -D warnings
+cargo clippy --locked --all-targets --all-features -- -D warnings
 # per-feature isolation (catches cfg-gating bugs the combined build masks —
 # code that only compiles because a sibling feature happens to be on):
-for f in aave morpho euler pyth redstone; do
+for f in aave morpho euler pyth redstone pending-oracle-updates pending-oracle-ethereum pending-oracle-mev-share; do
   cargo check --locked --no-default-features --features "$f"
 done
-cargo check --locked --examples --features aave,morpho,euler,pyth,redstone
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features aave,morpho,euler,pyth,redstone
+cargo check --locked --examples --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
 cargo package --locked
 ```
 
@@ -80,10 +78,8 @@ once against the release commit.
 ## 4. docs.rs verification
 
 docs.rs builds with `all-features` and `--cfg docsrs` (see
-`[package.metadata.docs.rs]` in `Cargo.toml`); the `doc_cfg` attribute in
-`src/lib.rs` stamps "Available on crate feature … only" badges on the
-`aave` / `morpho` / `euler` / `pyth` / `redstone`-gated items. After
-publishing, verify the badges render on the gated adapters and that the README
+`[package.metadata.docs.rs]` in `Cargo.toml`). After publishing, verify the
+feature-gated adapter and pending-oracle exports render and that the README
 badges (crates.io version, docs.rs) resolve.
 
 ## 5. Version, changelog, tag & publish

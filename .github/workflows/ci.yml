@@ -54,8 +54,8 @@ jobs:
       - name: Test default features
         run: cargo test --locked
 
-      - name: Test all adapter features
-        run: cargo test --locked --features aave,morpho,euler,pyth,redstone
+      - name: Test all non-live features
+        run: cargo test --locked --features aave,morpho,euler,pyth,redstone,pending-oracle-updates,pending-oracle-ethereum,pending-oracle-mev-share
 
       # `--all-features` additionally enables `live-tests`; the RPC-gated live
       # tests skip cleanly when no RPC endpoint is configured, so this passes
@@ -64,13 +64,13 @@ jobs:
         run: cargo test --locked --all-features
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets --features aave,morpho,euler,pyth,redstone -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Check examples
-        run: cargo check --locked --examples --features aave,morpho,euler,pyth,redstone
+        run: cargo check --locked --examples --all-features
 
       - name: Docs
-        run: cargo doc --locked --no-deps --features aave,morpho,euler,pyth,redstone
+        run: cargo doc --locked --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -97,6 +97,9 @@ jobs:
           - euler
           - pyth
           - redstone
+          - pending-oracle-updates
+          - pending-oracle-ethereum
+          - pending-oracle-mev-share
     steps:
       - name: Checkout
         uses: actions/checkout@v4

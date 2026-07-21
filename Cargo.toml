@@ -1,10 +1,10 @@
 [package]
 name = "evm-oracle-state"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-description = "EVM-backed Chainlink-style oracle state tracking over evm-fork-cache"
+description = "EVM-backed oracle state tracking and speculative update signals over evm-fork-cache"
 keywords = ["evm", "oracle", "chainlink", "defi"]
 categories = ["cryptography::cryptocurrencies", "simulation", "caching"]
 readme = "README.md"
@@ -29,10 +29,9 @@ exclude = [
     "RELEASING.md",
 ]
 
-# Build docs.rs with every adapter feature enabled so the published docs expose
-# Chainlink, Aave, Morpho, Euler, Pyth, RedStone, and live-test surfaces, and
-# pass `--cfg docsrs` so `doc_cfg` (see lib.rs) stamps feature badges on gated
-# items.
+# Build docs.rs with every adapter and pending-transport feature enabled so the
+# published docs expose the complete public surface. `--cfg docsrs` is retained
+# for docs.rs-only annotations in the crate root.
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -48,12 +47,29 @@ morpho = []
 euler = []
 pyth = []
 redstone = []
+pending-oracle-updates = []
+pending-oracle-ethereum = [
+    "pending-oracle-updates",
+    "dep:alloy-consensus",
+    "dep:futures-util",
+    "dep:serde_json",
+    "dep:tokio-tungstenite",
+    "tokio/time",
+]
+pending-oracle-mev-share = [
+    "pending-oracle-updates",
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:serde_json",
+    "tokio/time",
+]
 live-tests = ["alloy-provider/ws"]
 
 [dependencies]
 evm-fork-cache = "0.3.0"
 
 alloy-eips = "1.0.38"
+alloy-consensus = { version = "1.0.38", optional = true }
 alloy-network = "1.0.38"
 alloy-primitives = { version = "1.4", features = ["map"] }
 alloy-provider = "1.0.38"
@@ -61,8 +77,12 @@ alloy-rpc-types-eth = "1.0.38"
 alloy-sol-types = "1.4"
 
 thiserror = "2.0"
-tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "sync"] }
 tracing = "0.1.41"
+futures-util = { version = "0.3", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
+serde_json = { version = "1.0", optional = true }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"], optional = true }
 
 [dev-dependencies]
 alloy-provider = { version = "1.0.38", features = ["ws"] }
@@ -111,3 +131,9 @@ required-features = ["pyth"]
 [[example]]
 name = "redstone_push_demo"
 required-features = ["redstone"]
+
+# Offline pending-channel example: one feed registration, a separate speculative
+# stream, and a transaction-hash handoff suitable for downstream simulation.
+[[example]]
+name = "pending_oracle_updates"
+required-features = ["pending-oracle-updates"]
