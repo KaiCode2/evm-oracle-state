@@ -1,4 +1,7 @@
-#![cfg(feature = "pending-oracle-updates")]
+#![cfg(any(
+    feature = "pending-oracle-ethereum",
+    feature = "pending-oracle-mev-share"
+))]
 
 use evm_oracle_state::{PendingOracleCandidateSource, PendingOracleSource, PendingOracleSourceId};
 

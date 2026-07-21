@@ -16,13 +16,13 @@ reconciliation status.
 The domain model has no network I/O:
 
 ```toml
-evm-oracle-state = { version = "0.3.0-alpha.1", features = ["pending-oracle-updates"] }
+evm-oracle-state = { version = "0.3.0-alpha.2", features = ["pending-oracle-updates"] }
 ```
 
 Add only the transports you use:
 
 ```toml
-evm-oracle-state = { version = "0.3.0-alpha.1", features = [
+evm-oracle-state = { version = "0.3.0-alpha.2", features = [
   "pending-oracle-ethereum",
   "pending-oracle-mev-share",
 ] }

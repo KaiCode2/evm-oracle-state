@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-alpha.2] - 2026-07-21
+
+### Fixed
+
+- Corrected the transport-source integration-test gate so the domain-only
+  `pending-oracle-updates` feature passes the same isolated Clippy check as the
+  built-in transport features.
+
 ## [0.3.0-alpha.1] - 2026-07-21
 
 ### Added
@@ -175,6 +183,7 @@ Release-validation fixes that landed while preparing 0.1.0:
 - Curated fixture fix: the reactive smoke's MATIC/USD entry pointed at a
   mistyped (codeless) address; corrected to the verified on-chain proxy.
 
-[Unreleased]: https://github.com/KaiCode2/evm-oracle-state/compare/v0.3.0-alpha.1...HEAD
+[Unreleased]: https://github.com/KaiCode2/evm-oracle-state/compare/v0.3.0-alpha.2...HEAD
+[0.3.0-alpha.2]: https://github.com/KaiCode2/evm-oracle-state/releases/tag/v0.3.0-alpha.2
 [0.3.0-alpha.1]: https://github.com/KaiCode2/evm-oracle-state/releases/tag/v0.3.0-alpha.1
 [0.2.0]: https://github.com/KaiCode2/evm-oracle-state/releases/tag/v0.2.0
