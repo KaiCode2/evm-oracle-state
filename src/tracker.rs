@@ -543,7 +543,11 @@ impl OracleTracker {
         if report.reports.iter().any(|report| {
             matches!(
                 report.as_ref(),
-                ReactiveReport::Reorg(reorg) if !reorg.dropped_blocks.is_empty()
+                // A removed block can be outside the cache's retained journal.
+                // The typed tracker may still hold its event-derived value, so
+                // the reported dropped anchor is enough to revoke that value.
+                ReactiveReport::Reorg(reorg)
+                    if reorg.dropped.is_some() || !reorg.dropped_blocks.is_empty()
             )
         }) {
             self.mark_event_snapshots_unknown();

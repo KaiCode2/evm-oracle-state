@@ -361,6 +361,7 @@ async fn runtime_installs_and_uninstalls_handlers_with_engine_owner_lifecycle() 
 
     let installed = runtime
         .install_handlers_live_only(&mut engine)
+        .await
         .expect("oracle handlers should install");
     assert_eq!(installed.len(), 2);
     assert!(
@@ -380,7 +381,10 @@ async fn runtime_installs_and_uninstalls_handlers_with_engine_owner_lifecycle() 
             .is_some()
     );
 
-    let removed = runtime.uninstall_handlers(&mut engine);
+    let removed = runtime
+        .uninstall_handlers(&mut engine)
+        .await
+        .expect("uninstall handlers");
     assert_eq!(removed.removed_handler_ids.len(), 2);
     assert!(
         !engine
@@ -394,9 +398,28 @@ async fn runtime_installs_and_uninstalls_handlers_with_engine_owner_lifecycle() 
             .is_none()
     );
 
-    let backfill = SubscriberBackfill::range(90, 100);
+    assert!(
+        runtime
+            .install_handlers_with_backfill(&mut engine, SubscriberBackfill::range(90, 100))
+            .await
+            .is_err()
+    );
+    assert!(engine.subscriber().owners.is_empty());
+    engine
+        .ingest_batch(
+            &mut cache,
+            batch(
+                ReactiveInput::Log(rpc_log(event_source, vec![CUSTOM_TOPIC], vec![], 100, 0)),
+                context(100, 0),
+            ),
+        )
+        .expect("retain canonical backfill anchor");
+    let retained = context(100, 0).block.expect("block context");
+    let backfill = SubscriberBackfill::from_canonical_block_through(retained, retained.number)
+        .expect("exact retained backfill");
     runtime
         .install_handlers_with_backfill(&mut engine, backfill)
+        .await
         .expect("oracle handlers should install with explicit backfill");
     assert_eq!(
         engine
@@ -405,6 +428,55 @@ async fn runtime_installs_and_uninstalls_handlers_with_engine_owner_lifecycle() 
             .get(&HandlerId::new("test.custom-oracle")),
         Some(&backfill)
     );
+}
+
+#[tokio::test]
+async fn failed_uninstall_retains_outstanding_handler_ids_for_retry() {
+    let adapter = CustomOracleAdapter::new(
+        Address::repeat_byte(0x12),
+        Address::repeat_byte(0x22),
+        I256::unchecked_from(123_i64),
+    );
+    let mut cache = setup_cache().await;
+    let runtime = OracleRuntime::cache_builder()
+        .install_adapter(adapter)
+        .now_timestamp(1_700_000_030)
+        .build(&mut cache)
+        .await
+        .expect("runtime");
+    let mut engine = ReactiveEngine::new(
+        ReactiveRuntime::<Ethereum>::new(ReactiveConfig::default()),
+        RecordingSubscriber::default(),
+    );
+    let mut installed = runtime
+        .install_handlers_live_only(&mut engine)
+        .await
+        .expect("install");
+    assert_eq!(installed.len(), 2);
+    let first = installed.handler_ids[0].clone();
+    let rejected = installed.handler_ids[1].clone();
+    engine.subscriber_mut().fail_removal = Some(rejected.clone());
+
+    assert!(
+        runtime
+            .uninstall_installed_handlers(&mut engine, &mut installed)
+            .await
+            .is_err()
+    );
+    assert_eq!(installed.handler_ids, vec![rejected.clone()]);
+    assert!(!engine.runtime().contains_handler(&first));
+    assert!(engine.runtime().contains_handler(&rejected));
+    assert!(engine.subscriber().owner_interests(&rejected).is_some());
+
+    engine.subscriber_mut().fail_removal = None;
+    let report = runtime
+        .uninstall_installed_handlers(&mut engine, &mut installed)
+        .await
+        .expect("retry");
+    assert_eq!(report.removed_handler_ids, vec![rejected.clone()]);
+    assert!(installed.is_empty());
+    assert!(!engine.runtime().contains_handler(&rejected));
+    assert!(engine.subscriber().owner_interests(&rejected).is_none());
 }
 
 #[tokio::test]
@@ -425,6 +497,7 @@ async fn runtime_registers_adapter_on_demand_and_refreshes_live_engine() {
 
     let mut installed = oracle
         .install_handlers_live_only(&mut engine)
+        .await
         .expect("empty runtime should install built-in handler");
     assert_eq!(installed.len(), 1);
     assert!(
@@ -449,6 +522,7 @@ async fn runtime_registers_adapter_on_demand_and_refreshes_live_engine() {
 
     let refreshed = oracle
         .refresh_handlers_live_only(&mut engine, &mut installed)
+        .await
         .expect("refresh should replace installed handlers");
     assert_eq!(
         refreshed.previous_handler_ids,
@@ -500,6 +574,7 @@ async fn runtime_registers_adapter_on_demand_and_refreshes_live_engine() {
     assert_eq!(removed.removed_feed_ids, vec![FeedId::new("custom-usd")]);
     let refreshed = oracle
         .refresh_handlers_live_only(&mut engine, &mut installed)
+        .await
         .expect("refresh should remove empty adapter handler");
     assert!(
         refreshed
@@ -702,7 +777,7 @@ fn context(block_number: u64, log_index: u64) -> evm_fork_cache::reactive::React
         chain_id: Some(1),
         source: InputSource::Synthetic,
         chain_status: ChainStatus::Included {
-            block: block.clone(),
+            block,
             confirmations: 0,
         },
         block: Some(block),
@@ -723,17 +798,21 @@ struct RecordingSubscriber {
     base_interests: Vec<ReactiveInterest<Ethereum>>,
     owners: BTreeMap<HandlerId, Vec<ReactiveInterest<Ethereum>>>,
     backfills: BTreeMap<HandlerId, SubscriberBackfill>,
+    fail_removal: Option<HandlerId>,
 }
 
 impl EventSubscriber<Ethereum> for RecordingSubscriber {
     fn register_interests(
         &mut self,
         interests: &[ReactiveInterest<Ethereum>],
-    ) -> Result<(), SubscriberError> {
-        self.base_interests = interests.to_vec();
-        self.owners.clear();
-        self.backfills.clear();
-        Ok(())
+    ) -> evm_fork_cache::reactive::SubscriberOperation<'_, ()> {
+        let interests = interests.to_vec();
+        Box::pin(async move {
+            self.base_interests = interests;
+            self.owners.clear();
+            self.backfills.clear();
+            Ok(())
+        })
     }
 
     fn next_batch(&mut self) -> SubscriberNextBatch<'_, Ethereum> {
@@ -746,9 +825,12 @@ impl InterestOwnerSubscriber<Ethereum> for RecordingSubscriber {
         &mut self,
         owner: HandlerId,
         interests: &[ReactiveInterest<Ethereum>],
-    ) -> Result<(), SubscriberError> {
-        self.owners.insert(owner, interests.to_vec());
-        Ok(())
+    ) -> evm_fork_cache::reactive::SubscriberOperation<'_, ()> {
+        let interests = interests.to_vec();
+        Box::pin(async move {
+            self.owners.insert(owner, interests);
+            Ok(())
+        })
     }
 
     fn add_interest_owner_with_backfill(
@@ -756,18 +838,28 @@ impl InterestOwnerSubscriber<Ethereum> for RecordingSubscriber {
         owner: HandlerId,
         interests: &[ReactiveInterest<Ethereum>],
         backfill: SubscriberBackfill,
-    ) -> Result<(), SubscriberError> {
-        self.backfills.insert(owner.clone(), backfill);
-        self.owners.insert(owner, interests.to_vec());
-        Ok(())
+    ) -> evm_fork_cache::reactive::SubscriberOperation<'_, ()> {
+        let interests = interests.to_vec();
+        Box::pin(async move {
+            self.backfills.insert(owner.clone(), backfill);
+            self.owners.insert(owner, interests);
+            Ok(())
+        })
     }
 
     fn remove_interest_owner(
         &mut self,
         owner: &HandlerId,
-    ) -> Option<Vec<ReactiveInterest<Ethereum>>> {
-        self.backfills.remove(owner);
-        self.owners.remove(owner)
+    ) -> evm_fork_cache::reactive::SubscriberOperation<'_, Option<Vec<ReactiveInterest<Ethereum>>>>
+    {
+        let owner = owner.clone();
+        Box::pin(async move {
+            if self.fail_removal.as_ref() == Some(&owner) {
+                return Err(SubscriberError::Unsupported("test removal rejected"));
+            }
+            self.backfills.remove(&owner);
+            Ok(self.owners.remove(&owner))
+        })
     }
 
     fn owner_interests(&self, owner: &HandlerId) -> Option<&[ReactiveInterest<Ethereum>]> {

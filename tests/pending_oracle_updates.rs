@@ -9,7 +9,7 @@ use alloy_rpc_client::RpcClient;
 use alloy_transport::mock::Asserter;
 use evm_oracle_state::evm_fork_cache::cache::EvmCache;
 use evm_oracle_state::evm_fork_cache::reactive::{
-    EventSubscriber, ReactiveInputBatch, ReactiveInterest, SubscriberError, SubscriberNextBatch,
+    EventSubscriber, ReactiveInputBatch, ReactiveInterest, SubscriberNextBatch,
 };
 use evm_oracle_state::{
     ChainlinkFeed, ChainlinkFeedProvider, ChainlinkPendingAdapter, FeedId, FeedMetadata,
@@ -188,6 +188,7 @@ async fn confirmed_subscriber_factory_does_not_register_an_unsupported_pending_i
 
     runtime
         .register_subscriber(&mut subscriber)
+        .await
         .expect("register all interests");
 
     assert!(
@@ -873,9 +874,12 @@ impl EventSubscriber<Ethereum> for RecordingSubscriber {
     fn register_interests(
         &mut self,
         interests: &[ReactiveInterest<Ethereum>],
-    ) -> Result<(), SubscriberError> {
-        self.interests = interests.to_vec();
-        Ok(())
+    ) -> evm_fork_cache::reactive::SubscriberOperation<'_, ()> {
+        let interests = interests.to_vec();
+        Box::pin(async move {
+            self.interests = interests;
+            Ok(())
+        })
     }
 
     fn next_batch(&mut self) -> SubscriberNextBatch<'_, Ethereum> {

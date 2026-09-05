@@ -1,8 +1,8 @@
 [package]
 name = "evm-oracle-state"
-version = "0.3.0-alpha.2"
+version = "0.3.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 description = "EVM-backed oracle state tracking and speculative update signals over evm-fork-cache"
 keywords = ["evm", "oracle", "chainlink", "defi"]
@@ -66,7 +66,7 @@ pending-oracle-mev-share = [
 live-tests = ["alloy-provider/ws"]
 
 [dependencies]
-evm-fork-cache = "0.3.0"
+evm-fork-cache = "0.4.0"
 
 alloy-eips = "1.0.38"
 alloy-consensus = { version = "1.0.38", optional = true }
