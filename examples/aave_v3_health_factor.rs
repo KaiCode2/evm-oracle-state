@@ -437,7 +437,7 @@ async fn run_reactive_tracking(
             ..SubscriberConfig::default()
         },
     );
-    oracle_runtime.register_subscriber(&mut subscriber)?;
+    oracle_runtime.register_subscriber(&mut subscriber).await?;
 
     let start = Instant::now();
     let mut live_hooks = 0usize;

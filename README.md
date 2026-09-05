@@ -4,7 +4,7 @@
 [![docs.rs](https://img.shields.io/docsrs/evm-oracle-state)](https://docs.rs/evm-oracle-state)
 [![CI](https://github.com/KaiCode2/evm-oracle-state/actions/workflows/ci.yml/badge.svg)](https://github.com/KaiCode2/evm-oracle-state/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![MSRV](https://img.shields.io/badge/MSRV-1.88-informational)](https://github.com/KaiCode2/evm-oracle-state/blob/main/Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.90-informational)](https://github.com/KaiCode2/evm-oracle-state/blob/main/Cargo.toml)
 
 `evm-oracle-state` tracks single-value EVM oracle feeds through stable typed
 registrations. Chainlink-compatible feeds are tracked through proxy addresses;
@@ -45,7 +45,7 @@ compiled. The protocol adapters are opt-in features:
 cargo add evm-oracle-state --features aave,morpho,euler,pyth,redstone
 ```
 
-MSRV is 1.88. [`evm-fork-cache`](https://crates.io/crates/evm-fork-cache) is a
+MSRV is 1.90. [`evm-fork-cache`](https://crates.io/crates/evm-fork-cache) is a
 0.x public dependency released in lockstep and re-exported at the crate root
 (`evm_oracle_state::evm_fork_cache`), so downstream crates can name exactly the
 version this crate's signatures use.
@@ -110,7 +110,7 @@ initial decoder recognizes direct and forwarded Chainlink OCR2 transmissions;
 the public channel and event vocabulary remain oracle-agnostic.
 
 The confirmed `register_subscriber` factory deliberately remains committed-log
-only: `evm-fork-cache` 0.3 cannot hydrate the full pending transaction bodies
+only: `evm-fork-cache` does not automatically hydrate the full pending transaction bodies
 needed here. Enable the separate `pending-oracle-ethereum` and/or
 `pending-oracle-mev-share` transport feature, then attach its runtime-owned source
 with `start_pending_source`. Both sources reuse the feeds already registered on
@@ -679,17 +679,18 @@ The runtime can install its handlers into `evm-fork-cache`'s owner-scoped
 `ReactiveEngine`, then remove them later without disturbing unrelated handlers:
 
 ```rust,ignore
-let mut installed = oracle.install_handlers_live_only(&mut engine)?;
+let mut installed = oracle.install_handlers_live_only(&mut engine).await?;
 assert!(!installed.is_empty());
 
-let removed = oracle.uninstall_installed_handlers(&mut engine, &mut installed);
+let removed = oracle.uninstall_installed_handlers(&mut engine, &mut installed).await?;
 assert_eq!(removed.removed_handler_ids.len(), removed.handler_ids.len());
 ```
 
 Use `install_handlers(&mut engine)` for continuity-safe registration that
 backfills from the runtime's last canonical block, or
-`install_handlers_with_backfill(&mut engine, SubscriberBackfill::from_block(n))`
-for an explicit historical anchor. This is the preferred v0.3.0 path for
+`install_handlers_with_backfill` with an exact hash-certified block retained
+in the rollback journal. Await every registration/removal operation; deeper
+history requires global canonical ingestion. This is the preferred v0.3.0 path for
 registering/unregistering oracle tracking at runtime; the older
 `register_subscriber` helper remains a full-replacement bootstrap path.
 
@@ -703,12 +704,12 @@ let mutation = oracle
     .await?;
 assert!(mutation.registered_feed_ids.iter().any(|id| id.as_str() == "btc-usd"));
 
-let refreshed = oracle.refresh_handlers_live_only(&mut engine, &mut installed)?;
+let refreshed = oracle.refresh_handlers_live_only(&mut engine, &mut installed).await?;
 assert_eq!(installed.handler_ids, refreshed.installed_handler_ids);
 
 let removed = oracle.unregister_feed_by_id(FeedId::new("btc-usd"))?;
 assert_eq!(removed.removed_feed_ids.len(), 1);
-oracle.refresh_handlers_live_only(&mut engine, &mut installed)?;
+oracle.refresh_handlers_live_only(&mut engine, &mut installed).await?;
 ```
 
 The refresh step is explicit because it is the boundary where the in-memory
