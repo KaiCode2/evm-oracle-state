@@ -174,7 +174,7 @@ async fn run_live_tracking(
             ..SubscriberConfig::default()
         },
     );
-    oracle_runtime.register_subscriber(&mut subscriber)?;
+    oracle_runtime.register_subscriber(&mut subscriber).await?;
 
     println!("\nReactive RedStone tracking duration={duration}s idle_timeout={idle_timeout}s");
 

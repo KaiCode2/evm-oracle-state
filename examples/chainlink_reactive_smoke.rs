@@ -387,7 +387,7 @@ fn context_for_log(
         chain_id,
         source: InputSource::Poll,
         chain_status: ChainStatus::Included {
-            block: block.clone(),
+            block,
             confirmations: 0,
         },
         block: Some(block),

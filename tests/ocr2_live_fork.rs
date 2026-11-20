@@ -172,7 +172,7 @@ fn context() -> ReactiveContext {
         chain_id: Some(1),
         source: InputSource::Synthetic,
         chain_status: ChainStatus::Included {
-            block: block.clone(),
+            block,
             confirmations: 0,
         },
         block: Some(block),

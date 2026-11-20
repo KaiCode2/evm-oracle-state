@@ -910,7 +910,7 @@ impl<P> OracleRuntime<P> {
     ///
     /// Returns [`OracleError::Reactive`] when the engine rejects a handler
     /// registration (for example a handler id that is already installed).
-    pub fn install_handlers<S>(
+    pub async fn install_handlers<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
     ) -> Result<OracleReactiveInstallReport, OracleError>
@@ -920,7 +920,10 @@ impl<P> OracleRuntime<P> {
         let mut report = OracleReactiveInstallReport::default();
         for handler in self.reactive_handlers() {
             let id = handler.id();
-            engine.register_handler(handler).map_err(runtime_error)?;
+            engine
+                .register_handler(handler)
+                .await
+                .map_err(runtime_error)?;
             report.handler_ids.push(id);
         }
         Ok(report)
@@ -931,7 +934,7 @@ impl<P> OracleRuntime<P> {
     /// `installed` must be the report returned by a previous install/refresh.
     /// The old handler ids in that report are removed first, then the runtime's
     /// current handlers are installed with continuity-safe backfill.
-    pub fn refresh_handlers<S>(
+    pub async fn refresh_handlers<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
         installed: &mut OracleReactiveInstallReport,
@@ -940,10 +943,11 @@ impl<P> OracleRuntime<P> {
         S: InterestOwnerSubscriber<Ethereum>,
     {
         self.refresh_handlers_inner(engine, installed, OracleHandlerRefreshBackfill::Continuity)
+            .await
     }
 
     /// Refresh an existing engine install after mutation using explicit backfill.
-    pub fn refresh_handlers_with_backfill<S>(
+    pub async fn refresh_handlers_with_backfill<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
         installed: &mut OracleReactiveInstallReport,
@@ -957,10 +961,11 @@ impl<P> OracleRuntime<P> {
             installed,
             OracleHandlerRefreshBackfill::Explicit(backfill),
         )
+        .await
     }
 
     /// Refresh an existing engine install after mutation without backfill.
-    pub fn refresh_handlers_live_only<S>(
+    pub async fn refresh_handlers_live_only<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
         installed: &mut OracleReactiveInstallReport,
@@ -969,32 +974,41 @@ impl<P> OracleRuntime<P> {
         S: InterestOwnerSubscriber<Ethereum>,
     {
         self.refresh_handlers_inner(engine, installed, OracleHandlerRefreshBackfill::LiveOnly)
+            .await
     }
 
     /// Unregister exactly the handlers recorded by a previous install/refresh report.
-    pub fn uninstall_installed_handlers<S>(
+    ///
+    /// Await each subscriber removal before changing the report. On failure or
+    /// cancellation, `installed` retains the outstanding ids for retry.
+    pub async fn uninstall_installed_handlers<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
         installed: &mut OracleReactiveInstallReport,
-    ) -> OracleReactiveUninstallReport
+    ) -> Result<OracleReactiveUninstallReport, OracleError>
     where
         S: InterestOwnerSubscriber<Ethereum>,
     {
-        let handler_ids = std::mem::take(&mut installed.handler_ids);
-        let removed_handler_ids = unregister_handler_ids(engine, &handler_ids);
-        OracleReactiveUninstallReport {
+        let handler_ids = installed.handler_ids.clone();
+        let removed_handler_ids =
+            unregister_handler_ids(engine, &mut installed.handler_ids).await?;
+        Ok(OracleReactiveUninstallReport {
             handler_ids,
             removed_handler_ids,
-        }
+        })
     }
 
     /// Register this runtime's handlers with explicit owner-scoped backfill.
+    ///
+    /// The backfill must identify exactly one hash-certified block retained in
+    /// the engine's rollback journal. Use global canonical ingestion for deeper
+    /// history, or [`Self::install_handlers`] for coordinated catch-up.
     ///
     /// # Errors
     ///
     /// Returns [`OracleError::Reactive`] when the engine rejects a handler
     /// registration (for example a handler id that is already installed).
-    pub fn install_handlers_with_backfill<S>(
+    pub async fn install_handlers_with_backfill<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
         backfill: SubscriberBackfill,
@@ -1007,6 +1021,7 @@ impl<P> OracleRuntime<P> {
             let id = handler.id();
             engine
                 .register_handler_with_backfill(handler, backfill)
+                .await
                 .map_err(runtime_error)?;
             report.handler_ids.push(id);
         }
@@ -1019,7 +1034,7 @@ impl<P> OracleRuntime<P> {
     ///
     /// Returns [`OracleError::Reactive`] when the engine rejects a handler
     /// registration (for example a handler id that is already installed).
-    pub fn install_handlers_live_only<S>(
+    pub async fn install_handlers_live_only<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
     ) -> Result<OracleReactiveInstallReport, OracleError>
@@ -1031,6 +1046,7 @@ impl<P> OracleRuntime<P> {
             let id = handler.id();
             engine
                 .register_handler_live_only(handler)
+                .await
                 .map_err(runtime_error)?;
             report.handler_ids.push(id);
         }
@@ -1047,10 +1063,10 @@ impl<P> OracleRuntime<P> {
     /// [`Self::uninstall_installed_handlers`] with the report returned by the
     /// original install/refresh call — it removes exactly the handler ids
     /// that were installed.
-    pub fn uninstall_handlers<S>(
+    pub async fn uninstall_handlers<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
-    ) -> OracleReactiveUninstallReport
+    ) -> Result<OracleReactiveUninstallReport, OracleError>
     where
         S: InterestOwnerSubscriber<Ethereum>,
     {
@@ -1058,20 +1074,26 @@ impl<P> OracleRuntime<P> {
         for handler in self.reactive_handlers() {
             let id = handler.id();
             report.handler_ids.push(id.clone());
-            if engine.unregister_handler(&id).is_some() {
+            if engine
+                .unregister_handler(&id)
+                .await
+                .map_err(runtime_error)?
+                .is_some()
+            {
                 report.removed_handler_ids.push(id);
             }
         }
-        report
+        Ok(report)
     }
 
     /// Register this runtime's oracle interests with an event subscriber.
-    pub fn register_subscriber<S>(&self, subscriber: &mut S) -> Result<(), OracleError>
+    pub async fn register_subscriber<S>(&self, subscriber: &mut S) -> Result<(), OracleError>
     where
         S: EventSubscriber<Ethereum>,
     {
         subscriber
             .register_interests(&self.reactive_interests())
+            .await
             .map_err(runtime_error)
     }
 
@@ -1381,7 +1403,7 @@ impl<P> OracleRuntime<P> {
         )
     }
 
-    fn refresh_handlers_inner<S>(
+    async fn refresh_handlers_inner<S>(
         &self,
         engine: &mut ReactiveEngine<S, Ethereum>,
         installed: &mut OracleReactiveInstallReport,
@@ -1390,16 +1412,25 @@ impl<P> OracleRuntime<P> {
     where
         S: InterestOwnerSubscriber<Ethereum>,
     {
-        let previous_handler_ids = std::mem::take(&mut installed.handler_ids);
-        let removed_handler_ids = unregister_handler_ids(engine, &previous_handler_ids);
-        let new_install = match backfill {
-            OracleHandlerRefreshBackfill::Continuity => self.install_handlers(engine)?,
-            OracleHandlerRefreshBackfill::Explicit(backfill) => {
-                self.install_handlers_with_backfill(engine, backfill)?
+        let previous_handler_ids = installed.handler_ids.clone();
+        let removed_handler_ids =
+            unregister_handler_ids(engine, &mut installed.handler_ids).await?;
+        for handler in self.reactive_handlers() {
+            let id = handler.id();
+            match backfill {
+                OracleHandlerRefreshBackfill::Continuity => engine.register_handler(handler).await,
+                OracleHandlerRefreshBackfill::Explicit(backfill) => {
+                    engine
+                        .register_handler_with_backfill(handler, backfill)
+                        .await
+                }
+                OracleHandlerRefreshBackfill::LiveOnly => {
+                    engine.register_handler_live_only(handler).await
+                }
             }
-            OracleHandlerRefreshBackfill::LiveOnly => self.install_handlers_live_only(engine)?,
-        };
-        installed.handler_ids = new_install.handler_ids.clone();
+            .map_err(runtime_error)?;
+            installed.handler_ids.push(id);
+        }
         Ok(OracleReactiveRefreshReport {
             previous_handler_ids,
             removed_handler_ids,
@@ -1654,20 +1685,27 @@ fn feed_storage_addresses(registration: &FeedRegistration) -> Vec<Address> {
     addresses
 }
 
-fn unregister_handler_ids<S>(
+async fn unregister_handler_ids<S>(
     engine: &mut ReactiveEngine<S, Ethereum>,
-    handler_ids: &[HandlerId],
-) -> Vec<HandlerId>
+    handler_ids: &mut Vec<HandlerId>,
+) -> Result<Vec<HandlerId>, OracleError>
 where
     S: InterestOwnerSubscriber<Ethereum>,
 {
     let mut removed = Vec::new();
-    for id in handler_ids {
-        if engine.unregister_handler(id).is_some() {
-            removed.push(id.clone());
+    while let Some(id) = handler_ids.first().cloned() {
+        if engine
+            .unregister_handler(&id)
+            .await
+            .map_err(runtime_error)?
+            .is_some()
+        {
+            removed.push(id);
         }
+        // Retain failed and not-yet-attempted owners for an explicit retry.
+        handler_ids.remove(0);
     }
-    removed
+    Ok(removed)
 }
 
 fn cache_runtime_skip_error(skipped: &OracleAdapterFeedSkip) -> OracleError {

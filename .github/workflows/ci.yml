@@ -36,14 +36,14 @@ jobs:
             /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           df -h /
 
-      # 1.88.0 is the declared MSRV (Cargo.toml `rust-version`); pinning the
-      # whole validate matrix to it doubles as the MSRV gate, so a >1.88 API
+      # 1.90.0 is the declared MSRV (Cargo.toml `rust-version`); pinning the
+      # whole validate matrix to it doubles as the MSRV gate, so a >1.90 API
       # or a dependency MSRV bump cannot pass CI while breaking downstream
-      # consumers pinned to 1.88.
+      # consumers pinned to 1.90.
       - name: Install Rust
         run: |
-          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
-          rustup default 1.88.0
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.90.0
 
       - name: Fetch dependencies
         run: cargo fetch --locked
@@ -106,8 +106,8 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install 1.88.0 --profile minimal --component clippy
-          rustup default 1.88.0
+          rustup toolchain install 1.90.0 --profile minimal --component clippy
+          rustup default 1.90.0
 
       - name: Fetch dependencies
         run: cargo fetch --locked
@@ -137,8 +137,8 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
 
       - name: Skip when ETH_RPC_URL is not configured
         if: env.ETH_RPC_URL == ''

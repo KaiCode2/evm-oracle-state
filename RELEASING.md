@@ -1,14 +1,14 @@
 # Releasing `evm-oracle-state`
 
 Maintainer checklist for cutting and publishing a release. The public
-`evm-fork-cache 0.3.0` dependency must resolve from crates.io with no sibling
+`evm-fork-cache 0.4.0` dependency must resolve from crates.io with no sibling
 path override before packaging. Work the sections below in order.
 
 ## 1. Pre-publish verification
 
 Run the full matrix locally (or confirm green CI on the release commit). These
-mirror `.github/workflows/ci.yml`, which pins Rust **1.88.0** — the pinned
-toolchain doubles as the MSRV gate for `rust-version = "1.88"`:
+mirror `.github/workflows/ci.yml`, which pins Rust **1.90.0** — the pinned
+toolchain doubles as the MSRV gate for `rust-version = "1.90"`:
 
 ```bash
 cargo fmt --check
@@ -62,7 +62,7 @@ once against the release commit.
 - Confirm `Cargo.toml` metadata is release-ready: `version`, `license`
   (`MIT OR Apache-2.0`, with `LICENSE-APACHE` + `LICENSE-MIT` present),
   `description`, `repository`, `documentation`, `readme`, `keywords`,
-  `categories`, `rust-version` (MSRV `1.88`).
+  `categories`, `rust-version` (MSRV `1.90`).
 - The `[package].exclude` list drops local runtime state (`.env*`), the test
   suite, the maintainer smoke script, this file, and CI config — src, runnable
   examples, the `docs/` guides, README, changelog, and licenses ship. **Keep
@@ -96,12 +96,6 @@ badges (crates.io version, docs.rs) resolve.
   git tag -s vX.Y.Z -m "Release evm-oracle-state vX.Y.Z"
   git push origin vX.Y.Z
   ```
-- **If commits land on `main` after the tag exists**, re-point the tag at the
-  final commit *before* `cargo publish` — a stale tag silently publishes old
-  code's provenance (`.cargo_vcs_info.json`, the GitHub release link, and the
-  changelog anchor all disagree with the crate contents):
-  ```bash
-  git push origin :refs/tags/vX.Y.Z
-  git tag -fs vX.Y.Z -m "Release evm-oracle-state vX.Y.Z" <final-commit>
-  git push origin vX.Y.Z
-  ```
+- Verify the signed tag peels to the exact packaged release commit. Keep
+  published tags immutable. If further fixes are needed, prepare a new version
+  and repeat the release gates.

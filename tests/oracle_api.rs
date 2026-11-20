@@ -168,7 +168,7 @@ fn context(block_number: u64, log_index: u64) -> ReactiveContext {
         chain_id: Some(1),
         source: InputSource::Synthetic,
         chain_status: ChainStatus::Included {
-            block: block.clone(),
+            block,
             confirmations: 0,
         },
         block: Some(block),

@@ -1,17 +1,18 @@
 #![cfg(feature = "pending-oracle-updates")]
 
 use alloy_primitives::{
-    Address, B256, Bytes, I256, Log as PrimitiveLog, U256, aliases::I192, aliases::U40,
+    Address, B256, Bytes, I256, Log as PrimitiveLog, U256, aliases::I192, aliases::U40, keccak256,
 };
 use alloy_rpc_types_eth::Log as RpcLog;
 use alloy_sol_types::SolEvent;
 use evm_oracle_state::{
-    ChainlinkFeed, ChainlinkFeedProvider, OCR2_NEW_TRANSMISSION_TOPIC, OracleRuntime,
-    PendingOracleCandidateOutcome, PendingOracleConfig, PendingOracleEvent,
-    PendingOracleObserveOutcome, PendingOracleOrderingHandle, PendingOracleRoute,
-    PendingOracleSimulationMaterial, PendingOracleSource, PendingOracleSourceId,
-    PendingOracleStatus, PendingOracleTransmissionId, PendingOracleTransmissionStatus,
-    PendingTransportCandidate, ProviderFuture, RoundData, decode_chainlink_ocr2_calldata,
+    CHAINLINK_SVR_FORWARD_SELECTOR, ChainlinkFeed, ChainlinkFeedProvider,
+    OCR2_NEW_TRANSMISSION_TOPIC, OracleRuntime, PendingOracleCandidateOutcome, PendingOracleConfig,
+    PendingOracleEvent, PendingOracleObserveOutcome, PendingOracleOrderingHandle,
+    PendingOracleRoute, PendingOracleSimulationMaterial, PendingOracleSource,
+    PendingOracleSourceId, PendingOracleStatus, PendingOracleTransmissionId,
+    PendingOracleTransmissionStatus, PendingTransportCandidate, ProviderFuture, RoundData,
+    decode_chainlink_ocr2_calldata,
 };
 
 alloy_sol_types::sol! {
@@ -111,6 +112,140 @@ fn decodes_forwarded_chainlink_ocr2_secondary_transmit() {
             ..
         }
     ));
+}
+
+#[test]
+fn decodes_double_forwarded_atlas_svr_secondary_transmit() {
+    let aggregator = Address::repeat_byte(0x11);
+    let forwarder = Address::repeat_byte(0x22);
+    let dapp_control = Address::repeat_byte(0x33);
+    let inner_transmit = transmit_calldata(
+        1_784_106_045,
+        &test_observations(),
+        TRANSMIT_SECONDARY_SELECTOR,
+    );
+    let inner_forward = forward_calldata(aggregator, &inner_transmit);
+    let outer =
+        forward_calldata_with_selector(CHAINLINK_SVR_FORWARD_SELECTOR, forwarder, &inner_forward);
+
+    let decoded = decode_chainlink_ocr2_calldata(dapp_control, &outer)
+        .expect("valid Atlas SVR calldata")
+        .expect("recognized nested SVR forward");
+
+    assert_eq!(
+        decoded.route,
+        PendingOracleRoute::ChainlinkForwarded {
+            forwarder: dapp_control,
+            aggregator,
+            secondary: true,
+        }
+    );
+    assert_eq!(decoded.report.forwarder, Some(dapp_control));
+    assert_eq!(decoded.report.aggregator, aggregator);
+    assert!(decoded.report.secondary);
+    assert_eq!(
+        decoded.report.median_answer,
+        I256::unchecked_from(187_831_000_000_i64)
+    );
+    assert_eq!(decoded.report.calldata_hash, keccak256(&outer));
+    assert_eq!(
+        decoded.report.inner_calldata_hash,
+        keccak256(&inner_transmit)
+    );
+}
+
+#[test]
+fn decodes_single_svr_forward_and_rejects_malformed_nested_forward() {
+    let aggregator = Address::repeat_byte(0x11);
+    let dapp_control = Address::repeat_byte(0x33);
+    let inner_transmit = transmit_calldata(
+        1_784_106_045,
+        &test_observations(),
+        TRANSMIT_SECONDARY_SELECTOR,
+    );
+    let single =
+        forward_calldata_with_selector(CHAINLINK_SVR_FORWARD_SELECTOR, aggregator, &inner_transmit);
+
+    let decoded = decode_chainlink_ocr2_calldata(dapp_control, &single)
+        .expect("valid single SVR forward")
+        .expect("recognized single SVR forward");
+    assert_eq!(decoded.report.forwarder, Some(dapp_control));
+    assert_eq!(decoded.report.aggregator, aggregator);
+    assert!(decoded.report.secondary);
+
+    let malformed_outer = CHAINLINK_SVR_FORWARD_SELECTOR.to_vec();
+    assert!(decode_chainlink_ocr2_calldata(dapp_control, &malformed_outer).is_err());
+
+    let malformed_inner = forward_calldata_with_selector(
+        CHAINLINK_SVR_FORWARD_SELECTOR,
+        aggregator,
+        &FORWARD_SELECTOR,
+    );
+    assert!(decode_chainlink_ocr2_calldata(dapp_control, &malformed_inner).is_err());
+}
+
+#[tokio::test]
+async fn routes_atlas_svr_double_forwarded_candidate_to_registered_feed() {
+    let proxy = Address::repeat_byte(0x10);
+    let aggregator = Address::repeat_byte(0x11);
+    let forwarder = Address::repeat_byte(0x22);
+    let dapp_control = Address::repeat_byte(0x33);
+    let base_chain_id = 8453;
+    let atlas_source = PendingOracleSource::custom("base-atlas-svr");
+    let runtime = OracleRuntime::builder(DecoderProvider { proxy, aggregator })
+        .now_timestamp(1_700_000_100)
+        .feed(ChainlinkFeed::new(proxy).id("eth-usd"))
+        .pending_updates(PendingOracleConfig::for_chain(base_chain_id).source(atlas_source.clone()))
+        .build()
+        .await
+        .expect("runtime build");
+    let pending = runtime.pending_updates().unwrap();
+    let mut subscription = pending.subscribe();
+    let tx_hash = B256::repeat_byte(0x99);
+    let inner_transmit = transmit_calldata(
+        1_784_106_045,
+        &test_observations(),
+        TRANSMIT_SECONDARY_SELECTOR,
+    );
+    let outer = forward_calldata_with_selector(
+        CHAINLINK_SVR_FORWARD_SELECTOR,
+        forwarder,
+        &forward_calldata(aggregator, &inner_transmit),
+    );
+
+    let outcome = pending
+        .observe_chainlink_candidate(PendingTransportCandidate::new(
+            base_chain_id,
+            PendingOracleTransmissionId::from_hash(tx_hash),
+            atlas_source,
+            PendingOracleSourceId::new("atlas-auctioneer"),
+            dapp_control,
+            Bytes::from(outer),
+            PendingOracleOrderingHandle::TransactionHashOnly { tx_hash },
+            Some(57_579_532),
+        ))
+        .expect("decode Atlas SVR pending candidate");
+
+    assert_eq!(
+        outcome,
+        PendingOracleCandidateOutcome::Tracked(PendingOracleObserveOutcome::Observed)
+    );
+    let PendingOracleEvent::Observed(update) = subscription.recv().await.unwrap().event else {
+        panic!("expected observed update");
+    };
+    assert_eq!(update.feed_ids, [evm_oracle_state::FeedId::new("eth-usd")]);
+    assert_eq!(
+        update.proposed_value.unwrap().raw_answer,
+        I256::unchecked_from(187_831_000_000_i64)
+    );
+    assert_eq!(
+        update.transmissions[0].route,
+        PendingOracleRoute::ChainlinkForwarded {
+            forwarder: dapp_control,
+            aggregator,
+            secondary: true,
+        }
+    );
 }
 
 #[test]
@@ -424,9 +559,17 @@ fn transmit_calldata(timestamp: u64, observations: &[i64], selector: [u8; 4]) ->
 }
 
 fn forward_calldata(aggregator: Address, inner: &[u8]) -> Vec<u8> {
-    let mut calldata = Vec::from(FORWARD_SELECTOR);
+    forward_calldata_with_selector(FORWARD_SELECTOR, aggregator, inner)
+}
+
+fn forward_calldata_with_selector(
+    selector: [u8; 4],
+    target_addr: Address,
+    inner: &[u8],
+) -> Vec<u8> {
+    let mut calldata = Vec::from(selector);
     let mut target = [0_u8; 32];
-    target[12..].copy_from_slice(aggregator.as_slice());
+    target[12..].copy_from_slice(target_addr.as_slice());
     calldata.extend_from_slice(&target);
     calldata.extend_from_slice(&word(64));
     calldata.extend_from_slice(&dynamic_bytes(inner));
