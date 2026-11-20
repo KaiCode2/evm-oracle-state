@@ -10,7 +10,10 @@ pub const CHAINLINK_TRANSMIT_SELECTOR: [u8; 4] = [0xb1, 0xdc, 0x65, 0xa4];
 pub const CHAINLINK_TRANSMIT_SECONDARY_SELECTOR: [u8; 4] = [0xba, 0x0c, 0xb2, 0x9e];
 /// Chainlink forwarder `forward(address,bytes)` selector.
 pub const CHAINLINK_FORWARD_SELECTOR: [u8; 4] = [0x6f, 0xad, 0xcf, 0x72];
+/// Chainlink SVR Atlas DAppControl wrapper selector (`(address,bytes)` ABI).
+pub const CHAINLINK_SVR_FORWARD_SELECTOR: [u8; 4] = [0x02, 0xa6, 0x88, 0xed];
 
+const MAX_FORWARD_DEPTH: usize = 2;
 const MINIMUM_PLAUSIBLE_TIMESTAMP: u64 = 1_577_836_800;
 const MAXIMUM_OBSERVATIONS: usize = 256;
 
@@ -19,7 +22,8 @@ const MAXIMUM_OBSERVATIONS: usize = 256;
 pub struct ChainlinkPendingReport {
     /// Aggregator that would receive the OCR2 report.
     pub aggregator: Address,
-    /// Outer forwarder when the report is wrapped in `forward(address,bytes)`.
+    /// Outer forwarder when the report is wrapped in one or more `(address,bytes)`
+    /// forwarders (such as `forward(address,bytes)` or Chainlink SVR's Atlas wrapper).
     pub forwarder: Option<Address>,
     /// Whether the `transmitSecondary` entry point is used.
     pub secondary: bool,
@@ -89,7 +93,8 @@ pub enum PendingOracleDecodeError {
     },
 }
 
-/// Decode supported direct or forwarded Chainlink OCR2 calldata.
+/// Decode supported direct, forwarded, or nested-forwarded (e.g. Atlas SVR)
+/// Chainlink OCR2 calldata.
 ///
 /// Unknown selectors return `Ok(None)`. Once a supported outer or inner selector
 /// is recognized, malformed ABI or report content returns a typed error rather
@@ -98,18 +103,13 @@ pub fn decode_chainlink_ocr2_calldata(
     to: Address,
     outer_calldata: &[u8],
 ) -> Result<Option<DecodedChainlinkOcr2>, PendingOracleDecodeError> {
-    let Some(outer_selector) = outer_calldata.get(..4) else {
+    let Some(ForwardedCall {
+        aggregator,
+        forwarder,
+        inner_calldata,
+    }) = unwrap_forwards(to, outer_calldata)?
+    else {
         return Ok(None);
-    };
-
-    let (aggregator, forwarder, inner_calldata) = if outer_selector == CHAINLINK_FORWARD_SELECTOR {
-        let args = &outer_calldata[4..];
-        let target = abi_word(args, 0, "forward target")?;
-        let aggregator = Address::from_slice(&target[12..]);
-        let inner = dynamic_bytes(args, 32, "forward calldata")?;
-        (aggregator, Some(to), inner)
-    } else {
-        (to, None, outer_calldata)
     };
 
     let selector = inner_calldata
@@ -160,6 +160,52 @@ pub fn decode_chainlink_ocr2_calldata(
             calldata_hash: keccak256(outer_calldata),
             inner_calldata_hash: keccak256(inner_calldata),
         },
+    }))
+}
+
+struct ForwardedCall<'a> {
+    aggregator: Address,
+    forwarder: Option<Address>,
+    inner_calldata: &'a [u8],
+}
+
+fn is_forward_selector(selector: &[u8]) -> bool {
+    selector == CHAINLINK_FORWARD_SELECTOR || selector == CHAINLINK_SVR_FORWARD_SELECTOR
+}
+
+/// Unwrap up to [`MAX_FORWARD_DEPTH`] `(address, bytes)` forwarder wrappers,
+/// retaining the outermost call destination as `forwarder`.
+fn unwrap_forwards(
+    to: Address,
+    outer_calldata: &[u8],
+) -> Result<Option<ForwardedCall<'_>>, PendingOracleDecodeError> {
+    let Some(outer_selector) = outer_calldata.get(..4) else {
+        return Ok(None);
+    };
+    if !is_forward_selector(outer_selector) {
+        return Ok(Some(ForwardedCall {
+            aggregator: to,
+            forwarder: None,
+            inner_calldata: outer_calldata,
+        }));
+    }
+
+    let mut target = to;
+    let mut current = outer_calldata;
+    for _ in 0..MAX_FORWARD_DEPTH {
+        if !current.get(..4).is_some_and(is_forward_selector) {
+            break;
+        }
+        let args = &current[4..];
+        let next = abi_word(args, 0, "forward target")?;
+        target = Address::from_slice(&next[12..]);
+        current = dynamic_bytes(args, 32, "forward calldata")?;
+    }
+
+    Ok(Some(ForwardedCall {
+        aggregator: target,
+        forwarder: Some(to),
+        inner_calldata: current,
     }))
 }
 

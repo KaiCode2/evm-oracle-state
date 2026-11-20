@@ -8,10 +8,11 @@ use alloy_rpc_types_eth::Log;
 use crate::{FeedRegistration, FeedSource, OracleAdapterId, decode_ocr2_new_transmission};
 
 use super::{
-    CHAINLINK_FORWARD_SELECTOR, CHAINLINK_TRANSMIT_SECONDARY_SELECTOR, CHAINLINK_TRANSMIT_SELECTOR,
-    PendingOracleEvidence, PendingOracleObserveOutcome, PendingOracleOrderingHandle,
-    PendingOracleSimulationMaterial, PendingOracleTransmission, PendingOracleUpdate,
-    PendingOracleValue, PendingTransportCandidate, decode_chainlink_ocr2_calldata,
+    CHAINLINK_FORWARD_SELECTOR, CHAINLINK_SVR_FORWARD_SELECTOR,
+    CHAINLINK_TRANSMIT_SECONDARY_SELECTOR, CHAINLINK_TRANSMIT_SELECTOR, PendingOracleEvidence,
+    PendingOracleObserveOutcome, PendingOracleOrderingHandle, PendingOracleSimulationMaterial,
+    PendingOracleTransmission, PendingOracleUpdate, PendingOracleValue, PendingTransportCandidate,
+    decode_chainlink_ocr2_calldata,
 };
 
 /// Coarse upstream filter requested by one pending oracle adapter.
@@ -173,7 +174,11 @@ impl PendingOracleAdapter for ChainlinkPendingAdapter {
                     CHAINLINK_TRANSMIT_SECONDARY_SELECTOR,
                 ],
             ),
-            PendingOracleInterest::new(self.adapter_id(), [], [CHAINLINK_FORWARD_SELECTOR]),
+            PendingOracleInterest::new(
+                self.adapter_id(),
+                [],
+                [CHAINLINK_FORWARD_SELECTOR, CHAINLINK_SVR_FORWARD_SELECTOR],
+            ),
         ]
     }
 

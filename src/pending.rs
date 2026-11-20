@@ -31,9 +31,9 @@ pub use adapter::{
     PendingOracleInterest,
 };
 pub use chainlink::{
-    CHAINLINK_FORWARD_SELECTOR, CHAINLINK_TRANSMIT_SECONDARY_SELECTOR, CHAINLINK_TRANSMIT_SELECTOR,
-    ChainlinkPendingReport, DecodedChainlinkOcr2, PendingOracleDecodeError,
-    decode_chainlink_ocr2_calldata,
+    CHAINLINK_FORWARD_SELECTOR, CHAINLINK_SVR_FORWARD_SELECTOR,
+    CHAINLINK_TRANSMIT_SECONDARY_SELECTOR, CHAINLINK_TRANSMIT_SELECTOR, ChainlinkPendingReport,
+    DecodedChainlinkOcr2, PendingOracleDecodeError, decode_chainlink_ocr2_calldata,
 };
 #[cfg(feature = "pending-oracle-ethereum")]
 pub use ethereum::AlchemyPendingTransactionSource;
